@@ -13,7 +13,7 @@
     <label>朗读来源
       <select id="engine">
         <option value="system">Windows 系统语音</option>
-        <option value="kokoro">本地 Kokoro（中文）</option>
+        <option value="kokoro">本地 Kokoro</option>
       </select>
     </label>
     <label>声音
@@ -22,6 +22,7 @@
     <label>语速 <output id="rate-label">1.0</output> 倍
       <input id="rate" type="range" min="0.5" max="2" step="0.1" value="1">
     </label>
+    <p>松开滑杆就会保存。0.5 最慢，2 最快。</p>
     <button id="save" type="button">保存</button>
     <h2>供应商试验</h2>
     <p id="probe-status" role="status">正在查看能不能注册成语音供应商…</p>

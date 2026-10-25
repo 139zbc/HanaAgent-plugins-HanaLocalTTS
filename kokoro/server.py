@@ -64,14 +64,23 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(400, "empty input")
             return
         voice = str(data.get("voice") or DEFAULT_VOICE)
+        if not voice.replace("_", "").isalnum():
+            self.send_error(400, "bad voice")
+            return
         try:
             speed = float(data.get("speed") or 1)
         except (TypeError, ValueError):
             speed = 1
         speed = min(2, max(0.5, speed))
-        chunks = []
-        for _graphemes, _phonemes, audio in PIPELINE(text[:800], voice=voice, speed=speed):
-            chunks.append(audio)
+        print(f"speech voice={voice} speed={speed} chars={len(text)}", flush=True)
+        try:
+            chunks = []
+            for _graphemes, _phonemes, audio in PIPELINE(text[:800], voice=voice, speed=speed):
+                chunks.append(audio)
+        except Exception as error:
+            print(f"speech failed: {error}", flush=True)
+            self.send_error(500, "voice failed")
+            return
         if not chunks:
             self.send_error(500, "no audio")
             return

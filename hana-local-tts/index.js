@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { defineApp } from "./sdk/app-contract/server-client.js";
+import { KOKORO_VOICES } from "./kokoro-voices.js";
 
 export const name = "hana-local-tts";
 
@@ -11,7 +12,8 @@ const SPEAK_TIMEOUT_MS = 25000;
 const KOKORO_TIMEOUT_MS = 90000;
 const KOKORO_ROOT = "D:\\ProgramData\\OH-WorkSpace\\hanako\\kokoro-zh";
 const KOKORO_PORT = 8765;
-const KOKORO_VOICE = "zf_094";
+const KOKORO_DEFAULT_VOICE = "zf_094";
+const KOKORO_VOICE_IDS = new Set(KOKORO_VOICES.map((item) => item.id));
 const PROVIDER_ID = "hana-local-tts";
 const PROTOCOL_ID = "hana-local-tts-sapi";
 const ADAPTER_ID = "hana-local-tts-speech";
@@ -150,13 +152,18 @@ async function readSpeechPrefs(sdk) {
     const voice = all && typeof all.voice === "string" ? all.voice : "";
     const rate = clampRate(all && all.rate);
     const engine = all && all.engine === "kokoro" ? "kokoro" : "system";
-    return { voice, rate, engine };
+    const kokoroVoice = kokoroVoiceId(all && all.kokoroVoice);
+    return { voice, rate, engine, kokoroVoice };
   } catch {
-    return { voice: "", rate: 1, engine: "system" };
+    return { voice: "", rate: 1, engine: "system", kokoroVoice: KOKORO_DEFAULT_VOICE };
   }
 }
 
-function kokoroScript(textFile, wavFile, rate) {
+function kokoroVoiceId(value) {
+  return typeof value === "string" && KOKORO_VOICE_IDS.has(value) ? value : KOKORO_DEFAULT_VOICE;
+}
+
+function kokoroScript(textFile, wavFile, voice, rate) {
   const python = path.join(KOKORO_ROOT, ".venv", "Scripts", "python.exe");
   const server = path.join(KOKORO_ROOT, "server.py");
   return `
@@ -181,7 +188,7 @@ if (-not (Test-Kokoro)) {
   if (-not (Test-Kokoro)) { throw '本地 Kokoro 启动超时。请再点一次朗读。' }
 }
 $text = [System.IO.File]::ReadAllText('${quotePs(textFile)}', [System.Text.Encoding]::UTF8)
-$json = @{ input = $text.Trim(); voice = '${KOKORO_VOICE}'; speed = ${clampRate(rate)} } | ConvertTo-Json -Compress
+$json = @{ input = $text.Trim(); voice = '${quotePs(voice)}'; speed = ${clampRate(rate)} } | ConvertTo-Json -Compress
 $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
 Invoke-WebRequest -Uri 'http://127.0.0.1:${KOKORO_PORT}/v1/audio/speech' -Method POST -ContentType 'application/json' -Body $bytes -OutFile '${quotePs(wavFile)}' -TimeoutSec 80
 $player = New-Object System.Media.SoundPlayer '${quotePs(wavFile)}'
@@ -198,7 +205,8 @@ async function writeSpeechFile(sdk, text, voice, rate, wavFile) {
   if (prefs.engine === "kokoro") {
     await writeFile(textFile, text, "utf8");
     try {
-      await runPowerShell(executable, kokoroScript(textFile, wavFile, rate), KOKORO_TIMEOUT_MS);
+      const kokoroVoice = kokoroVoiceId(voice && KOKORO_VOICE_IDS.has(voice) ? voice : prefs.kokoroVoice);
+      await runPowerShell(executable, kokoroScript(textFile, wavFile, kokoroVoice, rate), KOKORO_TIMEOUT_MS);
     } finally {
       await rm(textFile, { force: true });
     }
@@ -355,7 +363,7 @@ export default defineApp(async (sdk) => {
       try {
         const voices = await listVoices(sdk);
         const prefs = await readSpeechPrefs(sdk);
-        return c.json({ voices, ...prefs });
+        return c.json({ voices, kokoroVoices: KOKORO_VOICES, ...prefs });
       } catch (error) {
         return c.json({ error: failureText(error) }, 500);
       }
@@ -371,14 +379,16 @@ export default defineApp(async (sdk) => {
       const voice = body && typeof body.voice === "string" ? body.voice.trim() : "";
       const rate = clampRate(body && body.rate);
       const engine = body && body.engine === "kokoro" ? "kokoro" : "system";
+      const kokoroVoice = kokoroVoiceId(body && body.kokoroVoice);
       if (voice.length > 120) return c.json({ error: "声音名称太长。" }, 400);
       try {
-        await sdk.config.setMany({ voice, rate, engine });
+        await sdk.config.setMany({ voice, rate, engine, kokoroVoice });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         return c.json({ error: message.slice(0, 180) }, 400);
       }
-      return c.json({ ok: true, voice, rate, engine });
+      await sdk.logger.info(`prefs saved engine=${engine} rate=${rate} kokoroVoice=${kokoroVoice}`);
+      return c.json({ ok: true, voice, rate, engine, kokoroVoice });
     });
   });
 
