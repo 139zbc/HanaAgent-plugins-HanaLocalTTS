@@ -20,6 +20,7 @@ const ADAPTER_ID = "hana-local-tts-speech";
 const MODEL_ID = "windows";
 
 let speechProviderError = "";
+let systemVoiceCache = [];
 
 function textResult(text) {
   return { content: [{ type: "text", text }] };
@@ -197,15 +198,14 @@ $player.Dispose()
 `.trim();
 }
 
-async function writeSpeechFile(sdk, text, voice, rate, wavFile) {
+async function writeSpeechFile(sdk, text, voice, rate, wavFile, engine) {
   const executable = await powershellPath(sdk);
   if (!executable) throw new Error("找不到 Windows PowerShell，没法把声音放出来。");
-  const prefs = await readSpeechPrefs(sdk);
   const textFile = `${wavFile}.txt`;
-  if (prefs.engine === "kokoro") {
+  if (engine === "kokoro") {
     await writeFile(textFile, text, "utf8");
     try {
-      const kokoroVoice = kokoroVoiceId(voice && KOKORO_VOICE_IDS.has(voice) ? voice : prefs.kokoroVoice);
+      const kokoroVoice = kokoroVoiceId(voice);
       await runPowerShell(executable, kokoroScript(textFile, wavFile, kokoroVoice, rate), KOKORO_TIMEOUT_MS);
     } finally {
       await rm(textFile, { force: true });
@@ -221,7 +221,30 @@ async function writeSpeechFile(sdk, text, voice, rate, wavFile) {
   }
 }
 
+function speechMode(defaultVoice) {
+  return {
+    id: "text2speech",
+    label: "文本转语音",
+    defaults: { format: "wav", voice: defaultVoice, speed: 1 },
+    parameterSchema: {
+      type: "object",
+      properties: {
+        voice: { type: "string", title: "声音", default: defaultVoice },
+        speed: { type: "number", title: "语速", minimum: 0.5, maximum: 2, default: 1 },
+        format: { type: "string", title: "格式", enum: ["wav"], default: "wav" },
+      },
+    },
+  };
+}
+
 function speechModelSnapshot() {
+  const windowsVoices = [
+    { id: "auto", displayName: "自动（中文优先）" },
+    ...systemVoiceCache.map((item) => ({
+      id: item.name,
+      displayName: item.culture ? `${item.name}（${item.culture}）` : item.name,
+    })),
+  ];
   return {
     media: {
       speech_generation: {
@@ -232,19 +255,16 @@ function speechModelSnapshot() {
             displayName: "Windows 系统语音",
             protocolId: PROTOCOL_ID,
             defaultVoiceId: "auto",
-            voices: [{ id: "auto", displayName: "自动（中文优先）" }],
-            modes: [
-              {
-                id: "text2speech",
-                defaults: { format: "wav", voice: "auto" },
-                parameterSchema: {
-                  properties: {
-                    format: { default: "wav" },
-                    voice: { default: "auto" },
-                  },
-                },
-              },
-            ],
+            voices: windowsVoices,
+            modes: [speechMode("auto")],
+          },
+          {
+            id: "kokoro",
+            displayName: "本地 Kokoro",
+            protocolId: PROTOCOL_ID,
+            defaultVoiceId: KOKORO_DEFAULT_VOICE,
+            voices: KOKORO_VOICES.map((item) => ({ id: item.id, displayName: item.label })),
+            modes: [speechMode(KOKORO_DEFAULT_VOICE)],
           },
         ],
       },
@@ -273,9 +293,10 @@ async function registerSpeechProvider(sdk) {
         const dir = hostCtx?.generatedDir;
         if (!dir) throw new Error("speech synthesis requires generatedDir");
         const name = `speech-${randomBytes(8).toString("hex")}.wav`;
+        const modelId = String(params?.modelId || params?.model || "");
         const voice = params?.voice && params.voice !== "auto" ? String(params.voice) : "";
         await mkdir(dir, { recursive: true });
-        await writeSpeechFile(sdk, Array.from(text).slice(0, MAX_CHARS).join(""), voice, clampRate(params?.speed), path.join(dir, name));
+        await writeSpeechFile(sdk, Array.from(text).slice(0, MAX_CHARS).join(""), voice, clampRate(params?.speed), path.join(dir, name), modelId === "kokoro" ? "kokoro" : "system");
         await sdk.logger.info(`speech provider wrote ${name}`);
         return { taskId: typeof params?.taskId === "string" && params.taskId ? params.taskId : name, files: [name] };
       },
@@ -292,32 +313,79 @@ async function registerSpeechProvider(sdk) {
   }
 }
 
-async function synthesize(sdk, text) {
-  const prefs = await readSpeechPrefs(sdk);
-  const dir = path.join(sdk.dataDir, "speak", randomBytes(8).toString("hex"));
-  const wavFile = path.join(dir, "speech.wav");
-  await mkdir(dir, { recursive: true });
-  try {
-    await writeSpeechFile(sdk, text, prefs.voice, prefs.rate, wavFile);
-    const wav = await readFile(wavFile);
-    if (wav.length < 44 || wav.subarray(0, 4).toString("ascii") !== "RIFF") {
-      return textResult("没有生成有效的音频。");
-    }
-    await sdk.logger.info(`speak ok bytes=${wav.length} engine=${prefs.engine} rate=${prefs.rate}`);
-    if (wav.length > 8 * 1024 * 1024) {
-      return textResult("这段音频超过 8MB，Hana 放不了。请换短一点的消息。");
-    }
-    return {
-      content: [{ type: "text", text: prefs.engine === "kokoro" ? "已用本地 Kokoro 朗读。" : "已朗读。" }],
-      details: { audio: { mimeType: "audio/wav", dataBase64: wav.toString("base64") } },
-    };
-  } finally {
-    await rm(dir, { recursive: true, force: true });
+async function waitForSpeechTask(sdk, taskId) {
+  const deadline = Date.now() + KOKORO_TIMEOUT_MS;
+  let task = null;
+  while (Date.now() < deadline) {
+    task = await sdk.media.getTask(taskId);
+    if (task && task.status && task.status !== "pending") return task;
+    await new Promise((resolve) => setTimeout(resolve, 400));
   }
+  return task;
+}
+
+function speedTypeError(error) {
+  const message = `${error && error.message ? error.message : error}`;
+  return message.includes("speech speed must be a finite number");
+}
+
+async function savedSpeed(sdk) {
+  const executable = await powershellPath(sdk);
+  if (!executable) return 1;
+  const script = `
+$ErrorActionPreference = 'Stop'
+$p = Join-Path (Join-Path (Join-Path $env:USERPROFILE '.hanako') 'user') 'preferences.json'
+$j = Get-Content -LiteralPath $p -Raw -Encoding UTF8 | ConvertFrom-Json
+$sg = $j.speechGeneration
+$id = [string]$sg.defaultSpeechModel.id
+$s = $sg.providerDefaults.'hana-local-tts'.models.$id.modes.text2speech.speed
+if ($null -eq $s) { '1' } else { [string]$s }
+`.trim();
+  try {
+    const { stdout } = await runPowerShell(executable, script, 15000);
+    return clampRate(stdout.trim());
+  } catch {
+    return 1;
+  }
+}
+
+async function requestSpeech(sdk, text, speed) {
+  const input = {
+    text,
+    providerId: PROVIDER_ID,
+    format: "wav",
+    delivery: { mode: "response" },
+  };
+  if (typeof speed === "number") input.speed = speed;
+  try {
+    return await sdk.bus.request("media:generate-speech", { scope: "app", input });
+  } catch (error) {
+    if (typeof speed === "number" || !speedTypeError(error)) throw error;
+    input.speed = await savedSpeed(sdk);
+    return sdk.bus.request("media:generate-speech", { scope: "app", input });
+  }
+}
+
+async function synthesize(sdk, text) {
+  const result = await requestSpeech(sdk, text);
+  const taskId = result?.tasks?.[0]?.taskId;
+  if (!taskId) return textResult("宿主没有返回语音任务。");
+  const task = await waitForSpeechTask(sdk, taskId);
+  if (task?.status !== "completed") {
+    return textResult(task?.failReason || "语音任务没有在限定时间内完成。");
+  }
+  await sdk.logger.info(`speak ok task=${taskId}`);
+  return textResult("已朗读。");
 }
 
 export default defineApp(async (sdk) => {
   await sdk.logger.info("hana-local-tts loaded");
+  try {
+    systemVoiceCache = await listVoices(sdk);
+  } catch (error) {
+    systemVoiceCache = [];
+    await sdk.logger.error(`system voices unavailable: ${failureText(error)}`);
+  }
   await registerSpeechProvider(sdk);
 
   await sdk.routes.register((app) => {
@@ -326,27 +394,10 @@ export default defineApp(async (sdk) => {
     app.post("/probe", async (c) => {
       if (speechProviderError) return c.json({ ok: false, error: speechProviderError }, 500);
       try {
-        const result = await sdk.bus.request("media:generate-speech", {
-          scope: "app",
-          input: {
-            text: "这是本地语音供应商测试。",
-            providerId: PROVIDER_ID,
-            modelId: MODEL_ID,
-            voice: "auto",
-            speed: 1,
-            format: "wav",
-            delivery: { mode: "response" },
-          },
-        });
+        const result = await requestSpeech(sdk, "这是本地语音供应商测试。");
         const taskId = result?.tasks?.[0]?.taskId;
         if (!taskId) return c.json({ ok: false, error: "宿主没有返回语音任务。", result }, 500);
-        const deadline = Date.now() + 30000;
-        let task = null;
-        while (Date.now() < deadline) {
-          task = await sdk.media.getTask(taskId);
-          if (task && task.status && task.status !== "pending") break;
-          await new Promise((resolve) => setTimeout(resolve, 400));
-        }
+        const task = await waitForSpeechTask(sdk, taskId);
         const completed = task?.status === "completed";
         return c.json({
           ok: completed,
