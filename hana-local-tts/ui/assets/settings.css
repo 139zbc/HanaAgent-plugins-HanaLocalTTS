@@ -8,6 +8,7 @@ button { font: inherit; justify-self: start; padding: 6px 14px; }
 
 .group { display: grid; gap: 2px; }
 .row { display: grid; grid-template-columns: 88px 1fr; align-items: baseline; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--border, rgba(0, 0, 0, 0.08)); }
+.row.column { grid-template-columns: 1fr; gap: 6px; }
 .row:last-of-type { border-bottom: none; }
 .label { font-size: 13px; color: var(--text-secondary, #7a7266); }
 .value { font-size: 14px; }
@@ -16,3 +17,11 @@ button { font: inherit; justify-self: start; padding: 6px 14px; }
 .value[data-state="ok"]::before { content: "●"; color: #3aa675; margin-right: 6px; font-size: 10px; vertical-align: 1px; }
 .value[data-state="bad"]::before { content: "●"; color: #c4645d; margin-right: 6px; font-size: 10px; vertical-align: 1px; }
 .value[data-state="loading"] { color: var(--text-secondary, #7a7266); }
+
+select, input[type="text"] { font: inherit; font-size: 13px; width: 100%; padding: 4px 8px; box-sizing: border-box; }
+.path-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; }
+button.small { padding: 3px 10px; font-size: 13px; }
+.progress-wrap { display: grid; gap: 6px; margin-top: 6px; }
+.progress-bar { height: 6px; border-radius: 3px; background: var(--border, rgba(0, 0, 0, 0.1)); overflow: hidden; }
+.progress-fill { height: 100%; width: 0; background: #3aa675; transition: width 0.5s; }
+#install-error { color: #c4645d; }

@@ -40,7 +40,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.split("?", 1)[0] != "/health":
             self.send_error(404)
             return
-        body = json.dumps({"ok": True, "device": DEVICE}).encode("utf-8")
+        body = json.dumps({"ok": True, "device": DEVICE, "root": ROOT}).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))

@@ -4,13 +4,14 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { defineApp } from "./sdk/app-contract/server-client.js";
 import { KOKORO_VOICES } from "./kokoro-voices.js";
+import { INSTALL_PY_B64, SERVER_PY_B64 } from "./kokoro-files.js";
 
 export const name = "hana-local-tts";
 
 const MAX_CHARS = 800;
 const SPEAK_TIMEOUT_MS = 25000;
 const KOKORO_TIMEOUT_MS = 90000;
-const KOKORO_ROOT = "D:\\ProgramData\\OH-WorkSpace\\hanako\\kokoro-zh";
+const KOKORO_ROOT_DEFAULT = "D:\\ProgramData\\OH-WorkSpace\\hanako\\kokoro-zh";
 const KOKORO_PORT = 8765;
 const KOKORO_DEFAULT_VOICE = "zf_094";
 const KOKORO_VOICE_IDS = new Set(KOKORO_VOICES.map((item) => item.id));
@@ -147,13 +148,16 @@ async function listVoices(sdk) {
   return parseVoices(stdout);
 }
 
-const KOKORO_STATUS_SCRIPT = `
+function kokoroStatusScript(root) {
+  return `
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-$root = '${quotePs(KOKORO_ROOT)}'
+$root = '${quotePs(root)}'
 $python = Join-Path $root '.venv\\Scripts\\python.exe'
 $server = Join-Path $root 'server.py'
-$installed = (Test-Path -LiteralPath $python) -and (Test-Path -LiteralPath $server)
+$model = Join-Path (Join-Path (Join-Path (Join-Path $root 'hf-cache') 'models--hexgrad--Kokoro-82M-v1.1-zh') 'snapshots') 'installed'
+$model = Join-Path $model 'kokoro-v1_1-zh.pth'
+$installed = (Test-Path -LiteralPath $python) -and (Test-Path -LiteralPath $server) -and (Test-Path -LiteralPath $model)
 $dirGB = $null
 if (Test-Path -LiteralPath $root) {
   $sum = (Get-ChildItem -LiteralPath $root -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
@@ -161,34 +165,63 @@ if (Test-Path -LiteralPath $root) {
 }
 $running = $false
 $device = ''
+$servedRoot = ''
 try {
-  $health = Invoke-WebRequest -Uri 'http://127.0.0.1:8765/health' -UseBasicParsing -TimeoutSec 2
+  $health = Invoke-WebRequest -Uri 'http://127.0.0.1:${KOKORO_PORT}/health' -UseBasicParsing -TimeoutSec 2
   if ($health.StatusCode -eq 200) {
     $running = $true
-    $device = ($health.Content | ConvertFrom-Json).device
+    $parsed = $health.Content | ConvertFrom-Json
+    $device = $parsed.device
+    $servedRoot = $parsed.root
   }
 } catch {}
-$result = @{ installed = $installed; dirGB = $dirGB; running = $running; device = $device }
+# 服务在跑，但可能不是这个目录起的：对比服务自报的 root
+$foreign = $false
+if ($running -and $installed -and $servedRoot) {
+  $a = [IO.Path]::GetFullPath($servedRoot).TrimEnd('\')
+  $b = [IO.Path]::GetFullPath($root).TrimEnd('\')
+  if ($a -ne $b) { $foreign = $true }
+}
+$result = @{ installed = $installed; dirGB = $dirGB; running = $running; device = $device; foreign = $foreign }
 $result | ConvertTo-Json -Compress
 `.trim();
+}
+
+async function defaultKokoroRoot(sdk) {
+  const executable = await powershellPath(sdk);
+  if (!executable) return "";
+  const script = `
+$ErrorActionPreference = 'Stop'
+$d = Join-Path (Join-Path (Join-Path (Join-Path $env:USERPROFILE '.hanako') 'app-data') 'hana-local-tts') 'kokoro'
+$d
+`.trim();
+  try {
+    const { stdout } = await runPowerShell(executable, script, 15000);
+    return String(stdout || "").trim();
+  } catch {
+    return "";
+  }
+}
 
 async function kokoroStatus(sdk) {
-  const result = { installed: false, dirGB: null, running: false, device: "", path: KOKORO_ROOT };
+  const root = await kokoroRoot(sdk);
+  const result = { installed: false, dirGB: null, running: false, foreign: false, device: "", path: root, defaultPath: await defaultKokoroRoot(sdk) };
   const executable = await powershellPath(sdk);
   if (!executable) return result;
   try {
-    const { stdout } = await runPowerShell(executable, KOKORO_STATUS_SCRIPT, 30000);
+    const { stdout } = await runPowerShell(executable, kokoroStatusScript(root), 30000);
     const parsed = JSON.parse(String(stdout || "").trim());
     if (parsed) {
       result.installed = parsed.installed === true;
       if (typeof parsed.dirGB === "number") result.dirGB = parsed.dirGB;
       result.running = parsed.running === true;
+      result.foreign = parsed.foreign === true;
       if (typeof parsed.device === "string") result.device = parsed.device;
     }
   } catch (error) {
     await sdk.logger.error(`kokoro status check failed: ${failureText(error)}`);
   }
-  await sdk.logger.info(`kokoro status: installed=${result.installed} dirGB=${result.dirGB} running=${result.running} device=${result.device || "-"}`);
+  await sdk.logger.info(`kokoro status: installed=${result.installed} dirGB=${result.dirGB} running=${result.running} foreign=${result.foreign} device=${result.device || "-"}`);
   return result;
 }
 
@@ -205,13 +238,29 @@ async function readSpeechPrefs(sdk) {
   }
 }
 
+function cleanInstallPath(value) {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (!text) return "";
+  const normalized = text.replace(/\/+$/, "").replace(/["']/g, "");
+  return /^[A-Za-z]:[\\\/].+/.test(normalized) ? normalized : "";
+}
+
+async function kokoroRoot(sdk) {
+  try {
+    const all = await sdk.config.getAll();
+    return cleanInstallPath(all && all.kokoroRoot) || KOKORO_ROOT_DEFAULT;
+  } catch {
+    return KOKORO_ROOT_DEFAULT;
+  }
+}
+
 function kokoroVoiceId(value) {
   return typeof value === "string" && KOKORO_VOICE_IDS.has(value) ? value : KOKORO_DEFAULT_VOICE;
 }
 
-function kokoroScript(textFile, wavFile, voice, rate) {
-  const python = path.join(KOKORO_ROOT, ".venv", "Scripts", "python.exe");
-  const server = path.join(KOKORO_ROOT, "server.py");
+function kokoroScript(root, textFile, wavFile, voice, rate) {
+  const python = path.join(root, ".venv", "Scripts", "python.exe");
+  const server = path.join(root, "server.py");
   return `
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -225,7 +274,7 @@ function Test-Kokoro {
 }
 if (-not (Test-Kokoro)) {
   if (-not (Test-Path -LiteralPath '${quotePs(python)}')) { throw '找不到本地 Kokoro。' }
-  Start-Process -FilePath '${quotePs(python)}' -ArgumentList '${quotePs(server)}' -WorkingDirectory '${quotePs(KOKORO_ROOT)}' -WindowStyle Hidden
+  Start-Process -FilePath '${quotePs(python)}' -ArgumentList '${quotePs(server)}' -WorkingDirectory '${quotePs(root)}' -WindowStyle Hidden
   $deadline = (Get-Date).AddSeconds(80)
   do {
     Start-Sleep -Milliseconds 500
@@ -251,7 +300,8 @@ async function writeSpeechFile(sdk, text, voice, rate, wavFile, engine) {
     await writeFile(textFile, text, "utf8");
     try {
       const kokoroVoice = kokoroVoiceId(voice);
-      await runPowerShell(executable, kokoroScript(textFile, wavFile, kokoroVoice, rate), KOKORO_TIMEOUT_MS);
+      const root = await kokoroRoot(sdk);
+      await runPowerShell(executable, kokoroScript(root, textFile, wavFile, kokoroVoice, rate), KOKORO_TIMEOUT_MS);
     } finally {
       await rm(textFile, { force: true });
     }
@@ -423,6 +473,87 @@ async function synthesize(sdk, text) {
   return textResult("已朗读。");
 }
 
+const KOKORO_INSTALL_SOURCES = { modelscope: "modelscope", "hf-mirror": "hf-mirror", huggingface: "huggingface" };
+let installStartedAt = 0;
+
+async function readInstallState(sdk, root) {
+  const state = { phase: "none", message: "", percent: null, error: null };
+  const executable = await powershellPath(sdk);
+  if (!executable) return state;
+  const script = `
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$p = Join-Path '${quotePs(root)}' 'install-state.json'
+if (Test-Path -LiteralPath $p) {
+  $text = [IO.File]::ReadAllText($p, [Text.Encoding]::UTF8)
+  [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($text))
+}
+`.trim();
+  try {
+    const { stdout } = await runPowerShell(executable, script, 15000);
+    // 只取最后一行纯 base64，避开 PowerShell 的 CLIXML 进度噪声
+    const b64 = String(stdout || "").trim().split(/\r?\n/).filter((line) => /^[A-Za-z0-9+/=]+$/.test(line.trim())).pop() || "";
+    if (b64) {
+      const text = Buffer.from(b64, "base64").toString("utf8");
+      const parsed = JSON.parse(text);
+      if (parsed) {
+        if (typeof parsed.phase === "string") state.phase = parsed.phase;
+        if (typeof parsed.message === "string") state.message = parsed.message;
+        if (typeof parsed.percent === "number") state.percent = parsed.percent;
+        if (typeof parsed.error === "string") state.error = parsed.error;
+      }
+    }
+  } catch {
+    // 状态文件读不到就当没安装过
+  }
+  return state;
+}
+
+async function startKokoroInstall(sdk, root, source, workDir) {
+  // 同一时刻只允许一个安装；上次启动 30 分钟内不重复启动
+  if (installStartedAt && Date.now() - installStartedAt < 30 * 60 * 1000) {
+    throw new Error("已有一次安装在进行中，请等它完成或失败后重试。");
+  }
+  const executable = await powershellPath(sdk);
+  if (!executable) throw new Error("找不到 Windows PowerShell。");
+  installStartedAt = Date.now();
+  try {
+    // base64 太大，不能直接拼进命令行（会 ENAMETOOLONG），先写进 App 能写的临时目录
+    const b64Dir = path.join(workDir, "install-b64");
+    await mkdir(b64Dir, { recursive: true });
+    const serverB64File = path.join(b64Dir, "server.b64");
+    const installB64File = path.join(b64Dir, "install.b64");
+    await writeFile(serverB64File, SERVER_PY_B64, "utf8");
+    await writeFile(installB64File, INSTALL_PY_B64, "utf8");
+    const script = `
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$root = '${quotePs(root)}'
+New-Item -ItemType Directory -Force -Path $root | Out-Null
+$serverB64 = (Get-Content -LiteralPath '${quotePs(serverB64File)}' -Raw).Trim()
+$installB64 = (Get-Content -LiteralPath '${quotePs(installB64File)}' -Raw).Trim()
+[IO.File]::WriteAllBytes((Join-Path $root 'server.py'), [Convert]::FromBase64String($serverB64))
+[IO.File]::WriteAllBytes((Join-Path $root 'install.py'), [Convert]::FromBase64String($installB64))
+$base = 'C:\\Users\\' + $env:USERNAME + '\\AppData\\Roaming\\uv\\python\\cpython-3.12.14-windows-x86_64-none\\python.exe'
+if (-not (Test-Path -LiteralPath $base)) {
+  $found = & py -V:Astral/CPython3.12.14 -c "import sys; print(sys.executable)" 2>$null
+  if ($found) { $base = $found.Trim() }
+}
+if (-not (Test-Path -LiteralPath $base)) { throw '找不到 Python 3.12。请先安装 Python 3.12（推荐用 uv）。' }
+$installer = Join-Path $root 'install.py'
+Start-Process -FilePath $base -ArgumentList @($installer, '--root', $root, '--source', '${quotePs(source)}') -WorkingDirectory $root -WindowStyle Hidden
+'ok'
+`.trim();
+    const { stdout } = await runPowerShell(executable, script, 120000);
+    if (!String(stdout || "").includes("ok")) throw new Error("安装进程没有启动。");
+    await sdk.logger.info(`kokoro install started root=${root} source=${source}`);
+    return { ok: true };
+  } catch (error) {
+    installStartedAt = 0;
+    throw error;
+  }
+}
+
 export default defineApp(async (sdk) => {
   await sdk.logger.info("hana-local-tts loaded");
   try {
@@ -462,6 +593,55 @@ export default defineApp(async (sdk) => {
       } catch (error) {
         return c.json({ error: failureText(error) }, 500);
       }
+    });
+
+    app.get("/kokoro-install", async (c) => {
+      try {
+        const root = await kokoroRoot(sdk);
+        const state = await readInstallState(sdk, root);
+        return c.json(state);
+      } catch (error) {
+        return c.json({ error: failureText(error) }, 500);
+      }
+    });
+
+    app.post("/kokoro-install", async (c) => {
+      let body;
+      try {
+        body = await c.req.json();
+      } catch {
+        body = null;
+      }
+      try {
+        const source = KOKORO_INSTALL_SOURCES[body && body.source] || "modelscope";
+        const root = cleanInstallPath(body && body.root) || (await kokoroRoot(sdk));
+        const status = await kokoroStatus(sdk);
+        if (status.installed) return c.json({ ok: false, error: "已经安装过了，不需要再装。" }, 400);
+        await sdk.config.setMany({ kokoroRoot: root });
+        const result = await startKokoroInstall(sdk, root, source, sdk.dataDir);
+        return c.json(result);
+      } catch (error) {
+        return c.json({ ok: false, error: failureText(error) }, 500);
+      }
+    });
+
+    app.put("/kokoro-path", async (c) => {
+      let body;
+      try {
+        body = await c.req.json();
+      } catch {
+        return c.json({ error: "请求不是 JSON。" }, 400);
+      }
+      const root = cleanInstallPath(body && body.root);
+      if (!root) return c.json({ error: "路径要写完整盘符，例如 D:\\models\\kokoro。" }, 400);
+      if (root.length > 160) return c.json({ error: "路径太长。" }, 400);
+      try {
+        await sdk.config.setMany({ kokoroRoot: root });
+      } catch (error) {
+        return c.json({ error: failureText(error) }, 500);
+      }
+      await sdk.logger.info(`kokoro root set to ${root}`);
+      return c.json({ ok: true, root });
     });
 
     app.get("/voices", async (c) => {

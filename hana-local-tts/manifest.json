@@ -51,6 +51,11 @@
             "type": "string",
             "title": "Kokoro 声音",
             "default": "zf_094"
+          },
+          "kokoroRoot": {
+            "type": "string",
+            "title": "Kokoro 安装路径",
+            "default": ""
           }
         }
       },

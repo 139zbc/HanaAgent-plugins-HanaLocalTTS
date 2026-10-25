@@ -35,6 +35,38 @@
     </section>
 
     <section class="group">
+      <h2>安装位置</h2>
+      <div class="row column">
+        <div class="path-row">
+          <input id="install-root" type="text" spellcheck="false">
+          <button id="save-path" type="button" class="small">保存</button>
+        </div>
+        <p class="hint" id="path-hint">模型装在这里。改路径后点保存。</p>
+      </div>
+    </section>
+
+    <section class="group" id="install-section" hidden>
+      <h2>安装 Kokoro</h2>
+      <p class="hint">还没有安装。选一个下载来源，点「安装」。大约要下载 1–1.5GB，需要几分钟到几十分钟。</p>
+
+      <div class="row">
+        <span class="label">下载来源</span>
+        <select id="install-source">
+          <option value="modelscope" selected>ModelScope（国内，推荐）</option>
+          <option value="hf-mirror">HF 镜像（国内备选）</option>
+          <option value="huggingface">HuggingFace（海外直连）</option>
+        </select>
+      </div>
+
+      <button id="install-btn" type="button">安装</button>
+      <div class="progress-wrap" id="progress-wrap" hidden>
+        <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+        <p class="hint" id="progress-message"></p>
+      </div>
+      <p class="hint" id="install-error" role="alert" hidden></p>
+    </section>
+
+    <section class="group">
       <h2>供应商试验</h2>
       <div class="row">
         <span class="label">注册状态</span>
