@@ -5,6 +5,8 @@ const voice = document.getElementById("voice");
 const rate = document.getElementById("rate");
 const rateLabel = document.getElementById("rate-label");
 const save = document.getElementById("save");
+const probeStatus = document.getElementById("probe-status");
+const probe = document.getElementById("probe");
 
 function showRate() {
   rateLabel.textContent = Number(rate.value).toFixed(1);
@@ -46,7 +48,34 @@ save.addEventListener("click", async () => {
   }
 });
 
+probe.addEventListener("click", async () => {
+  probe.disabled = true;
+  probeStatus.textContent = "正在请宿主合成一句话…";
+  try {
+    const response = await hana.api.fetch("probe", { method: "POST" });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok || !body.ok) throw new Error(body.error || "合成没有走通。");
+    probeStatus.textContent = "走通了。刚才那句「这是本地语音供应商测试」是宿主调用这个 App 读出来的。";
+  } catch (error) {
+    probeStatus.textContent = error instanceof Error ? error.message : "合成没有走通。";
+  } finally {
+    probe.disabled = false;
+  }
+});
+
 await hana.ready();
+try {
+  const probeResponse = await hana.api.fetch("probe");
+  const probeBody = await probeResponse.json();
+  probeStatus.textContent = probeBody.ready
+    ? "已注册。点「试一下合成」，听是不是这台电脑在读。"
+    : (probeBody.error || "还没注册成语音供应商。");
+  probe.disabled = !probeBody.ready;
+} catch (error) {
+  probeStatus.textContent = error instanceof Error ? error.message : "读不到供应商状态。";
+  probe.disabled = true;
+}
+
 try {
   const response = await hana.api.fetch("voices");
   const body = await response.json();

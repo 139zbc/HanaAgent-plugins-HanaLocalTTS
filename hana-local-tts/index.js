@@ -8,6 +8,12 @@ export const name = "hana-local-tts";
 
 const MAX_CHARS = 800;
 const SPEAK_TIMEOUT_MS = 25000;
+const PROVIDER_ID = "hana-local-tts";
+const PROTOCOL_ID = "hana-local-tts-sapi";
+const ADAPTER_ID = "hana-local-tts-speech";
+const MODEL_ID = "windows";
+
+let speechProviderError = "";
 
 function textResult(text) {
   return { content: [{ type: "text", text }] };
@@ -106,6 +112,12 @@ function parseVoices(stdout) {
 function failureText(error) {
   const code = error && error.code;
   const raw = `${error && error.message ? error.message : error}\n${error && error.stderr ? error.stderr : ""}`;
+  if (/app\/media\.provide/i.test(raw)) {
+    return "还没有「提供媒体」权限。请在设置 → 应用能力里允许，然后重新加载这个 App。";
+  }
+  if (/app\/media\.generate/i.test(raw)) {
+    return "还没有「生成媒体」权限。请在设置 → 应用能力里允许，然后重新加载这个 App。";
+  }
   if (code === "ERR_ACCESS_DENIED" || /process\.spawn|APP_CAPABILITY_DENIED|EPERM/i.test(raw)) {
     return "还不能朗读。请在设置里允许这个 App 启动进程，然后重新加载它。";
   }
@@ -136,6 +148,90 @@ async function readSpeechPrefs(sdk) {
     return { voice, rate };
   } catch {
     return { voice: "", rate: 1 };
+  }
+}
+
+async function writeSpeechFile(sdk, text, voice, rate, wavFile) {
+  const executable = await powershellPath(sdk);
+  if (!executable) throw new Error("找不到 Windows PowerShell，没法用系统语音朗读。");
+  const textFile = `${wavFile}.txt`;
+  await writeFile(textFile, text, "utf8");
+  try {
+    const preferChinese = /[\u4e00-\u9fff]/.test(text);
+    await runPowerShell(executable, buildScript(textFile, wavFile, voice, rate, preferChinese));
+  } finally {
+    await rm(textFile, { force: true });
+  }
+}
+
+function speechModelSnapshot() {
+  return {
+    media: {
+      speech_generation: {
+        defaultModelId: MODEL_ID,
+        models: [
+          {
+            id: MODEL_ID,
+            displayName: "Windows 系统语音",
+            protocolId: PROTOCOL_ID,
+            defaultVoiceId: "auto",
+            voices: [{ id: "auto", displayName: "自动（中文优先）" }],
+            modes: [
+              {
+                id: "text2speech",
+                defaults: { format: "wav", voice: "auto" },
+                parameterSchema: {
+                  properties: {
+                    format: { default: "wav" },
+                    voice: { default: "auto" },
+                  },
+                },
+              },
+            ],
+          },
+        ],
+      },
+    },
+  };
+}
+
+async function registerSpeechProvider(sdk) {
+  speechProviderError = "";
+  try {
+    await sdk.media.registerAdapter({
+      id: ADAPTER_ID,
+      protocolId: PROTOCOL_ID,
+      name: "本地语音朗读",
+      displayName: "本地语音朗读",
+      types: ["speech"],
+      capabilities: { formats: ["wav"], speedMin: 0.5, speedMax: 2 },
+      checkAuth() {
+        return { ok: true };
+      },
+      async submit(params, hostCtx) {
+        const text = String(params?.text || params?.prompt || "").trim();
+        if (!text) throw new Error("speech synthesis requires non-empty text");
+        const format = params?.format || "wav";
+        if (format !== "wav") throw new Error(`speech format "${format}" is not supported`);
+        const dir = hostCtx?.generatedDir;
+        if (!dir) throw new Error("speech synthesis requires generatedDir");
+        const name = `speech-${randomBytes(8).toString("hex")}.wav`;
+        const voice = params?.voice && params.voice !== "auto" ? String(params.voice) : "";
+        await mkdir(dir, { recursive: true });
+        await writeSpeechFile(sdk, Array.from(text).slice(0, MAX_CHARS).join(""), voice, clampRate(params?.speed), path.join(dir, name));
+        await sdk.logger.info(`speech provider wrote ${name}`);
+        return { taskId: typeof params?.taskId === "string" && params.taskId ? params.taskId : name, files: [name] };
+      },
+    });
+    await sdk.media.registerCapabilitySource(PROVIDER_ID, {
+      refresh() {
+        return speechModelSnapshot();
+      },
+    });
+    await sdk.logger.info("speech provider registered");
+  } catch (error) {
+    speechProviderError = failureText(error);
+    await sdk.logger.error(`speech provider not registered: ${speechProviderError}`);
   }
 }
 
@@ -171,8 +267,47 @@ async function synthesize(sdk, text) {
 
 export default defineApp(async (sdk) => {
   await sdk.logger.info("hana-local-tts loaded");
+  await registerSpeechProvider(sdk);
 
   await sdk.routes.register((app) => {
+    app.get("/probe", (c) => c.json({ ready: !speechProviderError, error: speechProviderError }));
+
+    app.post("/probe", async (c) => {
+      if (speechProviderError) return c.json({ ok: false, error: speechProviderError }, 500);
+      try {
+        const result = await sdk.bus.request("media:generate-speech", {
+          scope: "app",
+          input: {
+            text: "这是本地语音供应商测试。",
+            providerId: PROVIDER_ID,
+            modelId: MODEL_ID,
+            voice: "auto",
+            speed: 1,
+            format: "wav",
+            delivery: { mode: "response" },
+          },
+        });
+        const taskId = result?.tasks?.[0]?.taskId;
+        if (!taskId) return c.json({ ok: false, error: "宿主没有返回语音任务。", result }, 500);
+        const deadline = Date.now() + 30000;
+        let task = null;
+        while (Date.now() < deadline) {
+          task = await sdk.media.getTask(taskId);
+          if (task && task.status && task.status !== "pending") break;
+          await new Promise((resolve) => setTimeout(resolve, 400));
+        }
+        const completed = task?.status === "completed";
+        return c.json({
+          ok: completed,
+          error: completed ? "" : (task?.failReason || "语音任务没有在限定时间内完成。"),
+          taskId,
+          status: task?.status || "pending",
+        }, completed ? 200 : 500);
+      } catch (error) {
+        return c.json({ ok: false, error: failureText(error) }, 500);
+      }
+    });
+
     app.get("/voices", async (c) => {
       try {
         const voices = await listVoices(sdk);
