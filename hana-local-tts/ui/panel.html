@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>本地语音朗读</title>
+  <link rel="stylesheet" href="./assets/panel.css">
+</head>
+<body>
+  <main>
+    <h1>本地语音朗读</h1>
+    <p id="startup-status" role="status">正在加载…</p>
+  </main>
+  <script>
+    window.addEventListener('error', () => {
+      document.getElementById('startup-status').textContent = '页面没起来。请看 App 详情里的报错。';
+    }, true);
+  </script>
+  <script type="module" src="./assets/panel.js"></script>
+</body>
+</html>

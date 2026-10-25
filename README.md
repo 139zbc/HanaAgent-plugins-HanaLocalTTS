@@ -10,9 +10,9 @@
 
 ## 当前状态
 
-计划已定稿，尚未开始开发。完整计划见 [PLAN.md](PLAN.md)。
+M1 骨架在 `hana-local-tts/`：清单、图标、卡片封面和一页“已加载”面板。完整计划见 [PLAN.md](PLAN.md)。
 
-下一步：M1 — 用 hana-app-creator 脚手架生成 App 骨架。
+下一步：M2 — 消息上的“朗读”按钮，用 Windows 系统语音读出来。
 
 ## 开发约定
 

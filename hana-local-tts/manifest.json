@@ -1,0 +1,24 @@
+{
+  "manifestVersion": 2,
+  "id": "hana-local-tts",
+  "name": "\u672c\u5730\u8bed\u97f3\u6717\u8bfb",
+  "version": "0.1.0",
+  "entry": "index.js",
+  "capabilities": [
+    "app/tools.expose-to-model"
+  ],
+  "contributes": {
+    "cards": [
+      {
+        "id": "panel",
+        "title": "\u672c\u5730\u8bed\u97f3\u6717\u8bfb",
+        "route": "/panel.html",
+        "face": {
+          "image": "assets/cover.png"
+        }
+      }
+    ]
+  },
+  "icon": "assets/icon.jpg",
+  "minAppVersion": "1.2.1-beta"
+}
