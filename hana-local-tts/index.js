@@ -147,6 +147,51 @@ async function listVoices(sdk) {
   return parseVoices(stdout);
 }
 
+const KOKORO_STATUS_SCRIPT = `
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$root = '${quotePs(KOKORO_ROOT)}'
+$python = Join-Path $root '.venv\\Scripts\\python.exe'
+$server = Join-Path $root 'server.py'
+$installed = (Test-Path -LiteralPath $python) -and (Test-Path -LiteralPath $server)
+$dirGB = $null
+if (Test-Path -LiteralPath $root) {
+  $sum = (Get-ChildItem -LiteralPath $root -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+  if ($null -ne $sum) { $dirGB = [Math]::Round($sum / 1GB, 1) }
+}
+$running = $false
+$device = ''
+try {
+  $health = Invoke-WebRequest -Uri 'http://127.0.0.1:8765/health' -UseBasicParsing -TimeoutSec 2
+  if ($health.StatusCode -eq 200) {
+    $running = $true
+    $device = ($health.Content | ConvertFrom-Json).device
+  }
+} catch {}
+$result = @{ installed = $installed; dirGB = $dirGB; running = $running; device = $device }
+$result | ConvertTo-Json -Compress
+`.trim();
+
+async function kokoroStatus(sdk) {
+  const result = { installed: false, dirGB: null, running: false, device: "", path: KOKORO_ROOT };
+  const executable = await powershellPath(sdk);
+  if (!executable) return result;
+  try {
+    const { stdout } = await runPowerShell(executable, KOKORO_STATUS_SCRIPT, 30000);
+    const parsed = JSON.parse(String(stdout || "").trim());
+    if (parsed) {
+      result.installed = parsed.installed === true;
+      if (typeof parsed.dirGB === "number") result.dirGB = parsed.dirGB;
+      result.running = parsed.running === true;
+      if (typeof parsed.device === "string") result.device = parsed.device;
+    }
+  } catch (error) {
+    await sdk.logger.error(`kokoro status check failed: ${failureText(error)}`);
+  }
+  await sdk.logger.info(`kokoro status: installed=${result.installed} dirGB=${result.dirGB} running=${result.running} device=${result.device || "-"}`);
+  return result;
+}
+
 async function readSpeechPrefs(sdk) {
   try {
     const all = await sdk.config.getAll();
@@ -407,6 +452,15 @@ export default defineApp(async (sdk) => {
         }, completed ? 200 : 500);
       } catch (error) {
         return c.json({ ok: false, error: failureText(error) }, 500);
+      }
+    });
+
+    app.get("/kokoro-status", async (c) => {
+      try {
+        const status = await kokoroStatus(sdk);
+        return c.json(status);
+      } catch (error) {
+        return c.json({ error: failureText(error) }, 500);
       }
     });
 

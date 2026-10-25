@@ -1,9 +1,18 @@
 html, body { margin: 0; background: transparent; color: var(--text, #3b342b); font-family: system-ui, sans-serif; }
-main { display: grid; gap: 16px; max-width: 420px; }
-h1, h2 { margin: 0; font-size: 18px; font-weight: 500; }
-h2 { font-size: 16px; }
-p { margin: 0; line-height: 1.6; }
-label { display: grid; gap: 8px; }
-select, button { font: inherit; }
-select, input[type="range"] { width: 100%; }
-button { justify-self: start; padding: 6px 14px; }
+main { display: grid; gap: 20px; max-width: 460px; }
+p, h1, h2 { margin: 0; line-height: 1.6; }
+h1 { font-size: 18px; font-weight: 500; }
+h2 { font-size: 16px; font-weight: 500; }
+.hint { font-size: 13px; color: var(--text-secondary, #7a7266); }
+button { font: inherit; justify-self: start; padding: 6px 14px; }
+
+.group { display: grid; gap: 2px; }
+.row { display: grid; grid-template-columns: 88px 1fr; align-items: baseline; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--border, rgba(0, 0, 0, 0.08)); }
+.row:last-of-type { border-bottom: none; }
+.label { font-size: 13px; color: var(--text-secondary, #7a7266); }
+.value { font-size: 14px; }
+.value.mono { font-family: Consolas, monospace; font-size: 13px; word-break: break-all; }
+
+.value[data-state="ok"]::before { content: "●"; color: #3aa675; margin-right: 6px; font-size: 10px; vertical-align: 1px; }
+.value[data-state="bad"]::before { content: "●"; color: #c4645d; margin-right: 6px; font-size: 10px; vertical-align: 1px; }
+.value[data-state="loading"] { color: var(--text-secondary, #7a7266); }

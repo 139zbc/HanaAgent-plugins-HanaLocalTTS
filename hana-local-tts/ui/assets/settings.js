@@ -18,7 +18,48 @@ probe.addEventListener("click", async () => {
   }
 });
 
+function setRow(id, state, text) {
+  const element = document.getElementById(id);
+  element.dataset.state = state;
+  element.textContent = text;
+}
+
+async function loadKokoroStatus() {
+  setRow("kokoro-installed", "loading", "正在查看…");
+  setRow("kokoro-running", "loading", "正在查看…");
+  setRow("kokoro-device", "loading", "正在查看…");
+  document.getElementById("kokoro-path").textContent = "—";
+  try {
+    const response = await hana.api.fetch("kokoro-status");
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok || body.error) throw new Error(body.error || "读不到状态。");
+
+    setRow("kokoro-installed", body.installed ? "ok" : "bad",
+      body.installed ? (typeof body.dirGB === "number" ? `已安装（约 ${body.dirGB} GB）` : "已安装") : "没有安装");
+    document.getElementById("kokoro-path").textContent = body.path || "—";
+
+    if (body.running) {
+      setRow("kokoro-running", "ok", "服务运行中");
+      if (body.device) {
+        setRow("kokoro-device", "ok", body.device === "cuda" ? "GPU（显卡）" : "CPU");
+      } else {
+        setRow("kokoro-device", "loading", "服务没有上报运行模式");
+      }
+    } else {
+      setRow("kokoro-running", "bad", "服务没有运行");
+      setRow("kokoro-device", "loading", "服务没有运行时看不出");
+    }
+  } catch (error) {
+    setRow("kokoro-installed", "bad", "读不到状态");
+    setRow("kokoro-running", "bad", "读不到状态");
+    setRow("kokoro-device", "loading", error instanceof Error ? error.message : "读不到状态。");
+  }
+}
+
 await hana.ready();
+
+loadKokoroStatus();
+
 try {
   const probeResponse = await hana.api.fetch("probe");
   const probeBody = await probeResponse.json();

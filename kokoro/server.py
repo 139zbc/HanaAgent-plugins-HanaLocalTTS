@@ -11,6 +11,7 @@ from misaki.espeak import EspeakG2P
 REPO_ID = "hexgrad/Kokoro-82M-v1.1-zh"
 DEFAULT_VOICE = "zf_094"
 PORT = int(os.environ.get("KOKORO_PORT", "8765"))
+DEVICE = "cuda" if os.environ.get("KOKORO_DEVICE", "cpu") == "cuda" and torch.cuda.is_available() else "cpu"
 
 ROOT = os.path.dirname(__file__)
 os.environ.setdefault("HF_HUB_CACHE", os.path.join(ROOT, "hf-cache"))
@@ -28,7 +29,7 @@ def build_pipeline():
         phonemes, _ = english(text)
         return phonemes
 
-    return KPipeline(lang_code="z", repo_id=REPO_ID, device="cpu", en_callable=en_callable)
+    return KPipeline(lang_code="z", repo_id=REPO_ID, device=DEVICE, en_callable=en_callable)
 
 
 PIPELINE = build_pipeline()
@@ -39,7 +40,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.split("?", 1)[0] != "/health":
             self.send_error(404)
             return
-        body = b'{"ok":true}'
+        body = json.dumps({"ok": True, "device": DEVICE}).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))

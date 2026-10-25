@@ -8,12 +8,40 @@
 </head>
 <body>
   <main>
-    <h1>本地语音朗读</h1>
-    <p>朗读来源、声音和语速在 Hana 的「多媒体 → 语音合成 → 本地语音朗读」里设置。</p>
-    <p>合成模型有两项：Windows 系统语音、本地 Kokoro。点模型右边的星，把它设成默认。再在下面选声音和语速。语速留空就是 1 倍。</p>
-    <h2>供应商试验</h2>
-    <p id="probe-status" role="status">正在查看能不能注册成语音供应商…</p>
-    <button id="probe" type="button">试一下合成</button>
+    <p class="hint">朗读来源、声音和语速在 Hana 的「多媒体 → 语音合成 → 本地语音朗读」里设置。这里显示本地 Kokoro 的安装情况。</p>
+
+    <section class="group">
+      <h2>本地 Kokoro</h2>
+
+      <div class="row">
+        <span class="label">安装状态</span>
+        <span class="value" id="kokoro-installed" data-state="loading">正在查看…</span>
+      </div>
+
+      <div class="row">
+        <span class="label">运行状态</span>
+        <span class="value" id="kokoro-running" data-state="loading">正在查看…</span>
+      </div>
+
+      <div class="row">
+        <span class="label">安装路径</span>
+        <span class="value mono" id="kokoro-path">—</span>
+      </div>
+
+      <div class="row">
+        <span class="label">运行模式</span>
+        <span class="value" id="kokoro-device" data-state="loading">正在查看…</span>
+      </div>
+    </section>
+
+    <section class="group">
+      <h2>供应商试验</h2>
+      <div class="row">
+        <span class="label">注册状态</span>
+        <span class="value" id="probe-status" role="status">正在查看能不能注册成语音供应商…</span>
+      </div>
+      <button id="probe" type="button">试一下合成</button>
+    </section>
   </main>
   <script type="module" src="./assets/settings.js"></script>
 </body>
