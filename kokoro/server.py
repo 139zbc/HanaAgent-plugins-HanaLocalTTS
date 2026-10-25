@@ -76,7 +76,7 @@ class Handler(BaseHTTPRequestHandler):
         print(f"speech voice={voice} speed={speed} chars={len(text)}", flush=True)
         try:
             chunks = []
-            for _graphemes, _phonemes, audio in PIPELINE(text[:800], voice=voice, speed=speed):
+            for _graphemes, _phonemes, audio in PIPELINE(text[:2000], voice=voice, speed=speed):
                 chunks.append(audio)
         except Exception as error:
             print(f"speech failed: {error}", flush=True)

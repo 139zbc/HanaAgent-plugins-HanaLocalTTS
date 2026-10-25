@@ -8,7 +8,7 @@ import { INSTALL_PY_B64, SERVER_PY_B64 } from "./kokoro-files.js";
 
 export const name = "hana-local-tts";
 
-const MAX_CHARS = 800;
+const SPEECH_TEXT_MAX_BYTES = 32 * 1024; // 宿主的语音文本预算
 const SPEAK_TIMEOUT_MS = 25000;
 const KOKORO_TIMEOUT_MS = 90000;
 const KOKORO_ROOT_DEFAULT = "D:\\ProgramData\\OH-WorkSpace\\hanako\\kokoro-zh";
@@ -41,8 +41,13 @@ function sapiRate(multiplier) {
   return Math.round(Math.log2(clampRate(multiplier)) * 10);
 }
 
-function buildScript(textFile, wavFile, voice, rate, preferChinese) {
+function buildScript(textFile, wavFile, voice, rate, preferChinese, play = true) {
   const prefer = preferChinese ? "$true" : "$false";
+  const player = play
+    ? `$player = New-Object System.Media.SoundPlayer '${quotePs(wavFile)}'
+  $player.PlaySync()
+  $player.Dispose()`
+    : "";
   return `
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -62,9 +67,7 @@ try {
   $synth.SetOutputToWaveFile('${quotePs(wavFile)}')
   $synth.Speak($text)
   $synth.SetOutputToNull()
-  $player = New-Object System.Media.SoundPlayer '${quotePs(wavFile)}'
-  $player.PlaySync()
-  $player.Dispose()
+  ${player}
 } finally {
   $synth.Dispose()
 }
@@ -258,9 +261,14 @@ function kokoroVoiceId(value) {
   return typeof value === "string" && KOKORO_VOICE_IDS.has(value) ? value : KOKORO_DEFAULT_VOICE;
 }
 
-function kokoroScript(root, textFile, wavFile, voice, rate) {
+function kokoroScript(root, textFile, wavFile, voice, rate, play = true) {
   const python = path.join(root, ".venv", "Scripts", "python.exe");
   const server = path.join(root, "server.py");
+  const player = play
+    ? `$player = New-Object System.Media.SoundPlayer '${quotePs(wavFile)}'
+$player.PlaySync()
+$player.Dispose()`
+    : "";
   return `
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -286,13 +294,11 @@ $text = [System.IO.File]::ReadAllText('${quotePs(textFile)}', [System.Text.Encod
 $json = @{ input = $text.Trim(); voice = '${quotePs(voice)}'; speed = ${clampRate(rate)} } | ConvertTo-Json -Compress
 $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
 Invoke-WebRequest -Uri 'http://127.0.0.1:${KOKORO_PORT}/v1/audio/speech' -Method POST -ContentType 'application/json' -Body $bytes -OutFile '${quotePs(wavFile)}' -TimeoutSec 80
-$player = New-Object System.Media.SoundPlayer '${quotePs(wavFile)}'
-$player.PlaySync()
-$player.Dispose()
+${player}
 `.trim();
 }
 
-async function writeSpeechFile(sdk, text, voice, rate, wavFile, engine) {
+async function writeSpeechFile(sdk, text, voice, rate, wavFile, engine, play = true) {
   const executable = await powershellPath(sdk);
   if (!executable) throw new Error("找不到 Windows PowerShell，没法把声音放出来。");
   const textFile = `${wavFile}.txt`;
@@ -301,7 +307,7 @@ async function writeSpeechFile(sdk, text, voice, rate, wavFile, engine) {
     try {
       const kokoroVoice = kokoroVoiceId(voice);
       const root = await kokoroRoot(sdk);
-      await runPowerShell(executable, kokoroScript(root, textFile, wavFile, kokoroVoice, rate), KOKORO_TIMEOUT_MS);
+      await runPowerShell(executable, kokoroScript(root, textFile, wavFile, kokoroVoice, rate, play), KOKORO_TIMEOUT_MS);
     } finally {
       await rm(textFile, { force: true });
     }
@@ -310,9 +316,110 @@ async function writeSpeechFile(sdk, text, voice, rate, wavFile, engine) {
   await writeFile(textFile, text, "utf8");
   try {
     const preferChinese = /[\u4e00-\u9fff]/.test(text);
-    await runPowerShell(executable, buildScript(textFile, wavFile, voice, rate, preferChinese));
+    await runPowerShell(executable, buildScript(textFile, wavFile, voice, rate, preferChinese, play));
   } finally {
     await rm(textFile, { force: true });
+  }
+}
+
+// 只播放已经合好的 wav，不再合成。
+async function playWavFile(sdk, wavFile) {
+  const executable = await powershellPath(sdk);
+  if (!executable) throw new Error("找不到 Windows PowerShell，没法把声音放出来。");
+  const script = `
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$player = New-Object System.Media.SoundPlayer '${quotePs(wavFile)}'
+$player.PlaySync()
+$player.Dispose()
+`.trim();
+  await runPowerShell(executable, script, KOKORO_TIMEOUT_MS);
+}
+
+// 按句子切段：中文句末标点、英文句号、换行都算一段结束。
+// 太短的相邻段合并，避免一句一句合成拖慢整体。
+const SEGMENT_SOFT_LIMIT = 220;
+const SEGMENT_HARD_LIMIT = 320;
+
+function splitIntoSegments(rawText) {
+  const text = String(rawText || "").replace(/\r\n/g, "\n").trim();
+  if (!text) return [];
+  const pieces = text.split(/(?<=[。！？；!?;\n])/);
+  const segments = [];
+  let buffer = "";
+  const flush = () => {
+    const value = buffer.trim();
+    if (value) segments.push(value);
+    buffer = "";
+  };
+  for (const piece of pieces) {
+    if (!piece) continue;
+    // 单句超过硬上限时，按逗号再切
+    if (Array.from(piece).length > SEGMENT_HARD_LIMIT) {
+      flush();
+      const chunks = piece.split(/(?<=[，,、：:])/);
+      for (const chunk of chunks) {
+        if (!chunk) continue;
+        // 连逗号都没有的超长块：按字数硬切
+        let rest = chunk;
+        while (Array.from(rest).length > SEGMENT_HARD_LIMIT) {
+          const head = Array.from(rest).slice(0, SEGMENT_SOFT_LIMIT).join("");
+          segments.push(head);
+          rest = Array.from(rest).slice(SEGMENT_SOFT_LIMIT).join("");
+        }
+        if (!rest) continue;
+        if (Array.from(buffer).length + Array.from(rest).length > SEGMENT_HARD_LIMIT) flush();
+        buffer += rest;
+        if (Array.from(buffer).length >= SEGMENT_SOFT_LIMIT) flush();
+      }
+      continue;
+    }
+    if (Array.from(buffer).length + Array.from(piece).length > SEGMENT_SOFT_LIMIT) flush();
+    buffer += piece;
+    if (Array.from(buffer).length >= SEGMENT_SOFT_LIMIT) flush();
+  }
+  flush();
+  return segments;
+}
+
+// 流水线播放：当前段在放的同时，后台已经在合下一段。
+// 段间间隔 = 播放结束到下一段开始，只剩播放调用本身的启动开销，不再白等合成。
+// 流水线播放剩余段：当前段在放的同时，后台已在合下一段。
+// segments 不含已合好的第一段，所以 segments[0] 就是第二段。
+async function playRemainingSegments(sdk, dir, segments, voice, speed, engine, total, firstFile) {
+  const tempFile = () => path.join(dir, `speech-${randomBytes(8).toString("hex")}.wav`);
+  const prepare = (text) => {
+    const target = tempFile();
+    return writeSpeechFile(sdk, text, voice, speed, target, engine, false).then(() => target);
+  };
+
+  // 第一段已在 firstFile 里。先把第二段的合成发出去，再播第一段。
+  let currentFile = firstFile;
+  let nextReady = segments.length > 0 ? prepare(segments[0]) : null;
+  let playedIndex = 0;
+
+  while (currentFile) {
+    try {
+      await playWavFile(sdk, currentFile);
+      playedIndex += 1;
+      await sdk.logger.info(`speech segment ${playedIndex}/${total} played`);
+    } catch (error) {
+      await sdk.logger.error(`speech segment ${playedIndex + 1}/${total} playback failed: ${failureText(error)}`);
+      if (currentFile !== firstFile) await rm(currentFile, { force: true }).catch(() => {});
+      return;
+    }
+    // 第一段是宿主的产物文件，不能删；后面的临时段用完就删
+    if (currentFile !== firstFile) await rm(currentFile, { force: true }).catch(() => {});
+
+    if (!nextReady) break;
+    try {
+      currentFile = await nextReady;
+    } catch (error) {
+      await sdk.logger.error(`speech segment ${playedIndex + 1}/${total} failed: ${failureText(error)}`);
+      return;
+    }
+    // 下一段已就绪：立刻发出再下一段的合成，然后回去播它
+    nextReady = segments.length > playedIndex ? prepare(segments[playedIndex]) : null;
   }
 }
 
@@ -387,13 +494,33 @@ async function registerSpeechProvider(sdk) {
         if (format !== "wav") throw new Error(`speech format "${format}" is not supported`);
         const dir = hostCtx?.generatedDir;
         if (!dir) throw new Error("speech synthesis requires generatedDir");
-        const name = `speech-${randomBytes(8).toString("hex")}.wav`;
         const modelId = String(params?.modelId || params?.model || "");
+        const engine = modelId === "kokoro" ? "kokoro" : "system";
         const voice = params?.voice && params.voice !== "auto" ? String(params.voice) : "";
+        const speed = clampRate(params?.speed);
         await mkdir(dir, { recursive: true });
-        await writeSpeechFile(sdk, Array.from(text).slice(0, MAX_CHARS).join(""), voice, clampRate(params?.speed), path.join(dir, name), modelId === "kokoro" ? "kokoro" : "system");
-        await sdk.logger.info(`speech provider wrote ${name}`);
-        return { taskId: typeof params?.taskId === "string" && params.taskId ? params.taskId : name, files: [name] };
+
+        const segments = splitIntoSegments(text);
+        if (segments.length === 0) throw new Error("speech synthesis requires non-empty text");
+        const name = `speech-${randomBytes(8).toString("hex")}.wav`;
+        const taskId = typeof params?.taskId === "string" && params.taskId ? params.taskId : name;
+
+        if (segments.length === 1) {
+          await writeSpeechFile(sdk, segments[0], voice, speed, path.join(dir, name), engine);
+          await sdk.logger.info(`speech provider wrote ${name} (1 segment)`);
+          return { taskId, files: [name] };
+        }
+
+        // 多段：第一段合到返回文件（不播），立刻把第二段的合成发出去，再播第一段。
+        // 这样宿主拿到音频的同时，后台已经在准备下一段，段间只差播放启动开销。
+        const firstFile = path.join(dir, name);
+        await writeSpeechFile(sdk, segments[0], voice, speed, firstFile, engine, false);
+        const rest = segments.slice(1);
+        await sdk.logger.info(`speech provider wrote ${name} (1/${segments.length} segments, ${rest.length} queued)`);
+        playRemainingSegments(sdk, dir, rest, voice, speed, engine, segments.length, firstFile).catch(async (error) => {
+          await sdk.logger.error(`speech segments failed: ${failureText(error)}`);
+        });
+        return { taskId, files: [name] };
       },
     });
     await sdk.media.registerCapabilitySource(PROVIDER_ID, {
@@ -685,12 +812,13 @@ export default defineApp(async (sdk) => {
       const raw = typeof args?.context?.messageText === "string" ? args.context.messageText.trim() : "";
       if (!raw) return textResult("这条消息没有可朗读的文字。");
       const chars = Array.from(raw);
-      const text = chars.length > MAX_CHARS ? chars.slice(0, MAX_CHARS).join("") : raw;
+      // 不再自己截 800 字：长文交给 submit 按句分段。只卡宿主的 32KB 文本预算。
+      const text = raw;
+      if (new TextEncoder().encode(text).length > SPEECH_TEXT_MAX_BYTES) {
+        return textResult(`这条消息太长了（约 ${chars.length} 字），超过了语音合成的上限。请分段朗读。`);
+      }
       try {
         const result = await synthesize(sdk, text);
-        if (chars.length > MAX_CHARS && result.details?.audio) {
-          result.content = [{ type: "text", text: `只朗读了前 ${MAX_CHARS} 字。` }];
-        }
         return result;
       } catch (error) {
         await sdk.logger.error(failureText(error));
