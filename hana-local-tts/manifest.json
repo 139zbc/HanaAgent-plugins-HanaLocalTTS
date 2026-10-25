@@ -2,12 +2,22 @@
   "manifestVersion": 2,
   "id": "hana-local-tts",
   "name": "\u672c\u5730\u8bed\u97f3\u6717\u8bfb",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "entry": "index.js",
   "capabilities": [
-    "app/tools.expose-to-model"
+    "app/process.spawn"
   ],
   "contributes": {
+    "ui": {
+      "messageActions": [
+        {
+          "id": "speak",
+          "title": "朗读",
+          "messages": "assistant",
+          "toolName": "hana_local_tts_speak"
+        }
+      ]
+    },
     "cards": [
       {
         "id": "panel",
