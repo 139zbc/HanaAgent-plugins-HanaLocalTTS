@@ -1,0 +1,8 @@
+html, body { margin: 0; background: transparent; color: var(--text, #3b342b); font-family: system-ui, sans-serif; }
+main { display: grid; gap: 16px; max-width: 420px; }
+h1 { margin: 0; font-size: 18px; font-weight: 500; }
+p { margin: 0; line-height: 1.6; }
+label { display: grid; gap: 8px; }
+select, button { font: inherit; }
+select, input[type="range"] { width: 100%; }
+button { justify-self: start; padding: 6px 14px; }

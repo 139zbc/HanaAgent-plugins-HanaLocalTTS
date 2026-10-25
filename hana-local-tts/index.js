@@ -17,7 +17,17 @@ function quotePs(value) {
   return String(value).replaceAll("'", "''");
 }
 
-function buildScript(textFile, wavFile, preferChinese) {
+function clampRate(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 1;
+  return Math.min(2, Math.max(0.5, Math.round(number * 10) / 10));
+}
+
+function sapiRate(multiplier) {
+  return Math.round(Math.log2(clampRate(multiplier)) * 10);
+}
+
+function buildScript(textFile, wavFile, voice, rate, preferChinese) {
   const prefer = preferChinese ? "$true" : "$false";
   return `
 $ErrorActionPreference = 'Stop'
@@ -28,12 +38,13 @@ try {
   $text = [System.IO.File]::ReadAllText('${quotePs(textFile)}', [System.Text.Encoding]::UTF8)
   $voices = @($synth.GetInstalledVoices() | Where-Object { $_.Enabled })
   if ($voices.Count -eq 0) { throw '没有可用的系统语音。' }
-  $picked = $null
-  if (${prefer}) {
+  $picked = $voices | Where-Object { $_.VoiceInfo.Name -eq '${quotePs(voice)}' } | Select-Object -First 1
+  if (-not $picked -and ${prefer}) {
     $picked = $voices | Where-Object { $_.VoiceInfo.Culture.Name -like 'zh*' } | Select-Object -First 1
   }
   if (-not $picked) { $picked = $voices | Select-Object -First 1 }
   $synth.SelectVoice($picked.VoiceInfo.Name)
+  $synth.Rate = ${sapiRate(rate)}
   $synth.SetOutputToWaveFile('${quotePs(wavFile)}')
   $synth.Speak($text)
   $synth.SetOutputToNull()
@@ -45,6 +56,21 @@ try {
 }
 `.trim();
 }
+
+const LIST_SCRIPT = `
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+Add-Type -AssemblyName System.Speech
+$synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
+try {
+  $voices = @($synth.GetInstalledVoices() | Where-Object { $_.Enabled })
+  foreach ($item in $voices) {
+    Write-Output ($item.VoiceInfo.Name + [char]9 + $item.VoiceInfo.Culture.Name)
+  }
+} finally {
+  $synth.Dispose()
+}
+`.trim();
 
 function runPowerShell(executable, script) {
   const encoded = Buffer.from(script, "utf16le").toString("base64");
@@ -60,10 +86,21 @@ function runPowerShell(executable, script) {
           reject(error);
           return;
         }
-        resolve();
+        resolve({ stdout: String(stdout || "") });
       },
     );
   });
+}
+
+function parseVoices(stdout) {
+  return stdout.split(/\r?\n/).map((line) => {
+    const tab = line.indexOf("\t");
+    if (tab <= 0) return null;
+    const name = line.slice(0, tab).trim();
+    const culture = line.slice(tab + 1).trim();
+    if (!name) return null;
+    return { name, culture };
+  }).filter(Boolean);
 }
 
 function failureText(error) {
@@ -79,10 +116,34 @@ function failureText(error) {
   return `朗读失败：${(line || "系统语音没有返回音频。").slice(0, 180)}`;
 }
 
-async function synthesize(sdk, text) {
+async function powershellPath(sdk) {
   const executable = await sdk.process.resolveExecutable({ candidates: ["powershell.exe", "powershell"] });
+  return executable ? executable.path : "";
+}
+
+async function listVoices(sdk) {
+  const executable = await powershellPath(sdk);
+  if (!executable) return [];
+  const { stdout } = await runPowerShell(executable, LIST_SCRIPT);
+  return parseVoices(stdout);
+}
+
+async function readSpeechPrefs(sdk) {
+  try {
+    const all = await sdk.config.getAll();
+    const voice = all && typeof all.voice === "string" ? all.voice : "";
+    const rate = clampRate(all && all.rate);
+    return { voice, rate };
+  } catch {
+    return { voice: "", rate: 1 };
+  }
+}
+
+async function synthesize(sdk, text) {
+  const executable = await powershellPath(sdk);
   if (!executable) return textResult("找不到 Windows PowerShell，没法用系统语音朗读。");
 
+  const prefs = await readSpeechPrefs(sdk);
   const dir = path.join(sdk.dataDir, "speak", randomBytes(8).toString("hex"));
   const textFile = path.join(dir, "text.txt");
   const wavFile = path.join(dir, "speech.wav");
@@ -90,12 +151,12 @@ async function synthesize(sdk, text) {
   try {
     await writeFile(textFile, text, "utf8");
     const preferChinese = /[\u4e00-\u9fff]/.test(text);
-    await runPowerShell(executable.path, buildScript(textFile, wavFile, preferChinese));
+    await runPowerShell(executable, buildScript(textFile, wavFile, prefs.voice, prefs.rate, preferChinese));
     const wav = await readFile(wavFile);
     if (wav.length < 44 || wav.subarray(0, 4).toString("ascii") !== "RIFF") {
       return textResult("系统语音没有生成有效的音频。");
     }
-    await sdk.logger.info(`speak ok bytes=${wav.length}`);
+    await sdk.logger.info(`speak ok bytes=${wav.length} voice=${prefs.voice || "auto"} rate=${prefs.rate}`);
     if (wav.length > 8 * 1024 * 1024) {
       return textResult("这段音频超过 8MB，Hana 放不了。请换短一点的消息。");
     }
@@ -110,6 +171,37 @@ async function synthesize(sdk, text) {
 
 export default defineApp(async (sdk) => {
   await sdk.logger.info("hana-local-tts loaded");
+
+  await sdk.routes.register((app) => {
+    app.get("/voices", async (c) => {
+      try {
+        const voices = await listVoices(sdk);
+        const prefs = await readSpeechPrefs(sdk);
+        return c.json({ voices, ...prefs });
+      } catch (error) {
+        return c.json({ error: failureText(error) }, 500);
+      }
+    });
+
+    app.put("/preferences", async (c) => {
+      let body;
+      try {
+        body = await c.req.json();
+      } catch {
+        return c.json({ error: "请求不是 JSON。" }, 400);
+      }
+      const voice = body && typeof body.voice === "string" ? body.voice.trim() : "";
+      const rate = clampRate(body && body.rate);
+      if (voice.length > 120) return c.json({ error: "声音名称太长。" }, 400);
+      try {
+        await sdk.config.setMany({ voice, rate });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return c.json({ error: message.slice(0, 180) }, 400);
+      }
+      return c.json({ ok: true, voice, rate });
+    });
+  });
 
   await sdk.tools.register({
     name: "hana_local_tts_speak",

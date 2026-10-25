@@ -2,7 +2,7 @@
   "manifestVersion": 2,
   "id": "hana-local-tts",
   "name": "\u672c\u5730\u8bed\u97f3\u6717\u8bfb",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "entry": "index.js",
   "capabilities": [
     "app/process.spawn"
@@ -17,6 +17,24 @@
           "toolName": "hana_local_tts_speak"
         }
       ]
+    },
+    "settings": {
+      "title": "本地语音朗读",
+      "schema": {
+        "properties": {
+          "voice": {
+            "type": "string",
+            "title": "声音",
+            "default": ""
+          },
+          "rate": {
+            "type": "number",
+            "title": "语速",
+            "default": 1
+          }
+        }
+      },
+      "ui": { "route": "/settings.html" }
     },
     "cards": [
       {
