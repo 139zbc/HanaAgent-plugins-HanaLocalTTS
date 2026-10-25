@@ -8,6 +8,10 @@ export const name = "hana-local-tts";
 
 const MAX_CHARS = 800;
 const SPEAK_TIMEOUT_MS = 25000;
+const KOKORO_TIMEOUT_MS = 90000;
+const KOKORO_ROOT = "D:\\ProgramData\\OH-WorkSpace\\hanako\\kokoro-zh";
+const KOKORO_PORT = 8765;
+const KOKORO_VOICE = "zf_094";
 const PROVIDER_ID = "hana-local-tts";
 const PROTOCOL_ID = "hana-local-tts-sapi";
 const ADAPTER_ID = "hana-local-tts-speech";
@@ -78,13 +82,13 @@ try {
 }
 `.trim();
 
-function runPowerShell(executable, script) {
+function runPowerShell(executable, script, timeout = SPEAK_TIMEOUT_MS) {
   const encoded = Buffer.from(script, "utf16le").toString("base64");
   return new Promise((resolve, reject) => {
     execFile(
       executable,
       ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
-      { timeout: SPEAK_TIMEOUT_MS, windowsHide: true, maxBuffer: 1024 * 1024 },
+      { timeout, windowsHide: true, maxBuffer: 1024 * 1024 },
       (error, stdout, stderr) => {
         if (error) {
           error.stderr = stderr;
@@ -145,16 +149,61 @@ async function readSpeechPrefs(sdk) {
     const all = await sdk.config.getAll();
     const voice = all && typeof all.voice === "string" ? all.voice : "";
     const rate = clampRate(all && all.rate);
-    return { voice, rate };
+    const engine = all && all.engine === "kokoro" ? "kokoro" : "system";
+    return { voice, rate, engine };
   } catch {
-    return { voice: "", rate: 1 };
+    return { voice: "", rate: 1, engine: "system" };
   }
+}
+
+function kokoroScript(textFile, wavFile, rate) {
+  const python = path.join(KOKORO_ROOT, ".venv", "Scripts", "python.exe");
+  const server = path.join(KOKORO_ROOT, "server.py");
+  return `
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+function Test-Kokoro {
+  try {
+    $health = Invoke-WebRequest -Uri 'http://127.0.0.1:${KOKORO_PORT}/health' -UseBasicParsing -TimeoutSec 2
+    return $health.StatusCode -eq 200
+  } catch {
+    return $false
+  }
+}
+if (-not (Test-Kokoro)) {
+  if (-not (Test-Path -LiteralPath '${quotePs(python)}')) { throw '找不到本地 Kokoro。' }
+  Start-Process -FilePath '${quotePs(python)}' -ArgumentList '${quotePs(server)}' -WorkingDirectory '${quotePs(KOKORO_ROOT)}' -WindowStyle Hidden
+  $deadline = (Get-Date).AddSeconds(80)
+  do {
+    Start-Sleep -Milliseconds 500
+    if (Test-Kokoro) { break }
+  } while ((Get-Date) -lt $deadline)
+  if (-not (Test-Kokoro)) { throw '本地 Kokoro 启动超时。请再点一次朗读。' }
+}
+$text = [System.IO.File]::ReadAllText('${quotePs(textFile)}', [System.Text.Encoding]::UTF8)
+$json = @{ input = $text.Trim(); voice = '${KOKORO_VOICE}'; speed = ${clampRate(rate)} } | ConvertTo-Json -Compress
+$bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+Invoke-WebRequest -Uri 'http://127.0.0.1:${KOKORO_PORT}/v1/audio/speech' -Method POST -ContentType 'application/json' -Body $bytes -OutFile '${quotePs(wavFile)}' -TimeoutSec 80
+$player = New-Object System.Media.SoundPlayer '${quotePs(wavFile)}'
+$player.PlaySync()
+$player.Dispose()
+`.trim();
 }
 
 async function writeSpeechFile(sdk, text, voice, rate, wavFile) {
   const executable = await powershellPath(sdk);
-  if (!executable) throw new Error("找不到 Windows PowerShell，没法用系统语音朗读。");
+  if (!executable) throw new Error("找不到 Windows PowerShell，没法把声音放出来。");
+  const prefs = await readSpeechPrefs(sdk);
   const textFile = `${wavFile}.txt`;
+  if (prefs.engine === "kokoro") {
+    await writeFile(textFile, text, "utf8");
+    try {
+      await runPowerShell(executable, kokoroScript(textFile, wavFile, rate), KOKORO_TIMEOUT_MS);
+    } finally {
+      await rm(textFile, { force: true });
+    }
+    return;
+  }
   await writeFile(textFile, text, "utf8");
   try {
     const preferChinese = /[\u4e00-\u9fff]/.test(text);
@@ -236,28 +285,22 @@ async function registerSpeechProvider(sdk) {
 }
 
 async function synthesize(sdk, text) {
-  const executable = await powershellPath(sdk);
-  if (!executable) return textResult("找不到 Windows PowerShell，没法用系统语音朗读。");
-
   const prefs = await readSpeechPrefs(sdk);
   const dir = path.join(sdk.dataDir, "speak", randomBytes(8).toString("hex"));
-  const textFile = path.join(dir, "text.txt");
   const wavFile = path.join(dir, "speech.wav");
   await mkdir(dir, { recursive: true });
   try {
-    await writeFile(textFile, text, "utf8");
-    const preferChinese = /[\u4e00-\u9fff]/.test(text);
-    await runPowerShell(executable, buildScript(textFile, wavFile, prefs.voice, prefs.rate, preferChinese));
+    await writeSpeechFile(sdk, text, prefs.voice, prefs.rate, wavFile);
     const wav = await readFile(wavFile);
     if (wav.length < 44 || wav.subarray(0, 4).toString("ascii") !== "RIFF") {
-      return textResult("系统语音没有生成有效的音频。");
+      return textResult("没有生成有效的音频。");
     }
-    await sdk.logger.info(`speak ok bytes=${wav.length} voice=${prefs.voice || "auto"} rate=${prefs.rate}`);
+    await sdk.logger.info(`speak ok bytes=${wav.length} engine=${prefs.engine} rate=${prefs.rate}`);
     if (wav.length > 8 * 1024 * 1024) {
       return textResult("这段音频超过 8MB，Hana 放不了。请换短一点的消息。");
     }
     return {
-      content: [{ type: "text", text: "已朗读。" }],
+      content: [{ type: "text", text: prefs.engine === "kokoro" ? "已用本地 Kokoro 朗读。" : "已朗读。" }],
       details: { audio: { mimeType: "audio/wav", dataBase64: wav.toString("base64") } },
     };
   } finally {
@@ -327,14 +370,15 @@ export default defineApp(async (sdk) => {
       }
       const voice = body && typeof body.voice === "string" ? body.voice.trim() : "";
       const rate = clampRate(body && body.rate);
+      const engine = body && body.engine === "kokoro" ? "kokoro" : "system";
       if (voice.length > 120) return c.json({ error: "声音名称太长。" }, 400);
       try {
-        await sdk.config.setMany({ voice, rate });
+        await sdk.config.setMany({ voice, rate, engine });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         return c.json({ error: message.slice(0, 180) }, 400);
       }
-      return c.json({ ok: true, voice, rate });
+      return c.json({ ok: true, voice, rate, engine });
     });
   });
 

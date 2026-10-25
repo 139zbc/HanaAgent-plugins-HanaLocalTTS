@@ -2,7 +2,7 @@
   "manifestVersion": 2,
   "id": "hana-local-tts",
   "name": "\u672c\u5730\u8bed\u97f3\u6717\u8bfb",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "entry": "index.js",
   "capabilities": [
     "app/process.spawn",
@@ -41,6 +41,11 @@
             "type": "number",
             "title": "语速",
             "default": 1
+          },
+          "engine": {
+            "type": "string",
+            "title": "朗读来源",
+            "default": "system"
           }
         }
       },

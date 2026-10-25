@@ -10,6 +10,12 @@
   <main>
     <h1>本地语音朗读</h1>
     <p id="status" role="status">正在读取已安装的语音…</p>
+    <label>朗读来源
+      <select id="engine">
+        <option value="system">Windows 系统语音</option>
+        <option value="kokoro">本地 Kokoro（中文）</option>
+      </select>
+    </label>
     <label>声音
       <select id="voice"></select>
     </label>

@@ -1,6 +1,7 @@
 import { hana } from "./sdk.js";
 
 const status = document.getElementById("status");
+const engine = document.getElementById("engine");
 const voice = document.getElementById("voice");
 const rate = document.getElementById("rate");
 const rateLabel = document.getElementById("rate-label");
@@ -36,11 +37,13 @@ save.addEventListener("click", async () => {
     const response = await hana.api.fetch("preferences", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ voice: voice.value, rate: Number(rate.value) }),
+      body: JSON.stringify({ voice: voice.value, rate: Number(rate.value), engine: engine.value }),
     });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(body.error || "保存失败。");
-    status.textContent = "已保存。再点「朗读」，用的就是这个声音和语速。";
+    status.textContent = engine.value === "kokoro"
+      ? "已保存。再点「朗读」。第一次用本地 Kokoro 要多等一会儿。"
+      : "已保存。再点「朗读」，用的就是这个声音和语速。";
   } catch (error) {
     status.textContent = error instanceof Error ? error.message : "保存失败。";
   } finally {
@@ -80,6 +83,7 @@ try {
   const response = await hana.api.fetch("voices");
   const body = await response.json();
   if (!response.ok) throw new Error(body.error || "读不到系统语音。");
+  engine.value = body.engine === "kokoro" ? "kokoro" : "system";
   fillVoices(Array.isArray(body.voices) ? body.voices : [], typeof body.voice === "string" ? body.voice : "");
   rate.value = String(typeof body.rate === "number" ? body.rate : 1);
   showRate();
