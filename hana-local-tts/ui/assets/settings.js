@@ -25,28 +25,152 @@ function setRow(id, state, text) {
   element.textContent = text;
 }
 
+let openSelect = null;
+
+function dressSelect(select) {
+  const root = document.createElement("div");
+  root.className = "tts-select" + (select.id === "device-select" ? " is-short" : "");
+  select.parentNode.insertBefore(root, select);
+  root.appendChild(select);
+  select.classList.add("tts-select-native");
+
+  const trigger = document.createElement("button");
+  trigger.type = "button";
+  trigger.className = "tts-select-trigger";
+  trigger.setAttribute("aria-haspopup", "listbox");
+  trigger.setAttribute("aria-expanded", "false");
+  const value = document.createElement("span");
+  value.className = "tts-select-value";
+  const chevron = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  chevron.setAttribute("viewBox", "0 0 16 16");
+  chevron.setAttribute("aria-hidden", "true");
+  chevron.classList.add("tts-select-chevron");
+  chevron.innerHTML = '<path d="M4 6.2 8 10.2 12 6.2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>';
+  trigger.append(value, chevron);
+
+  const popup = document.createElement("div");
+  popup.className = "tts-select-popup";
+  popup.hidden = true;
+  popup.setAttribute("role", "listbox");
+  root.append(trigger, popup);
+
+  function labelOf(option) {
+    return option ? option.textContent : "";
+  }
+
+  function sync() {
+    const chosen = select.selectedOptions[0];
+    value.textContent = labelOf(chosen);
+    trigger.disabled = select.disabled;
+    root.hidden = select.hidden;
+    if (select.hidden || select.disabled) close();
+  }
+
+  function place() {
+    const rect = trigger.getBoundingClientRect();
+    popup.style.width = `${rect.width}px`;
+    popup.style.left = `${rect.left}px`;
+    const below = window.innerHeight - rect.bottom;
+    if (below < 160 && rect.top > below) {
+      popup.style.top = "auto";
+      popup.style.bottom = `${window.innerHeight - rect.top + 4}px`;
+    } else {
+      popup.style.bottom = "auto";
+      popup.style.top = `${rect.bottom + 4}px`;
+    }
+  }
+
+  function close() {
+    popup.hidden = true;
+    trigger.setAttribute("aria-expanded", "false");
+    if (openSelect === close) openSelect = null;
+  }
+
+  function open() {
+    if (openSelect && openSelect !== close) openSelect();
+    popup.replaceChildren();
+    for (const option of select.options) {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "tts-select-option";
+      item.setAttribute("role", "option");
+      item.textContent = option.textContent;
+      item.disabled = option.disabled;
+      const selected = option.value === select.value;
+      item.setAttribute("aria-selected", selected ? "true" : "false");
+      item.addEventListener("click", () => {
+        if (option.disabled) return;
+        select.value = option.value;
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+        sync();
+        close();
+      });
+      popup.appendChild(item);
+    }
+    popup.hidden = false;
+    trigger.setAttribute("aria-expanded", "true");
+    place();
+    openSelect = close;
+  }
+
+  trigger.addEventListener("click", () => {
+    if (trigger.disabled) return;
+    if (popup.hidden) open();
+    else close();
+  });
+  select.addEventListener("change", sync);
+  new MutationObserver(sync).observe(select, { attributes: true, attributeFilter: ["hidden", "disabled"] });
+  document.addEventListener("pointerdown", (event) => {
+    if (popup.hidden) return;
+    if (root.contains(event.target) || popup.contains(event.target)) return;
+    close();
+  });
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") close();
+  });
+  window.addEventListener("resize", () => { if (!popup.hidden) place(); });
+  sync();
+  return { sync };
+}
+
 // ---- 安装区 ----
 
-const installSection = document.getElementById("install-section");
 const installSource = document.getElementById("install-source");
 const installRoot = document.getElementById("install-root");
-const pathHint = document.getElementById("path-hint");
 const startBtn = document.getElementById("kokoro-start");
 const stopBtn = document.getElementById("kokoro-stop");
 const autostopRow = document.getElementById("autostop-row");
 const autostopToggle = document.getElementById("autostop-toggle");
 const deviceSelect = document.getElementById("device-select");
-const deviceConfirmRow = document.getElementById("device-confirm-row");
-const deviceConfirmBtn = document.getElementById("device-confirm");
-const installBtn = document.getElementById("install-btn");
+const sourceDress = dressSelect(installSource);
+const deviceDress = dressSelect(deviceSelect);
+const downloadModel = document.getElementById("download-model");
+const downloadCpu = document.getElementById("download-cpu");
+const downloadGpu = document.getElementById("download-gpu");
 const savePath = document.getElementById("save-path");
-const progressWrap = document.getElementById("progress-wrap");
-const progressFill = document.getElementById("progress-fill");
-const progressMessage = document.getElementById("progress-message");
 const installError = document.getElementById("install-error");
+const progressUi = {
+  model: {
+    wrap: document.getElementById("progress-model"),
+    fill: document.getElementById("fill-model"),
+    message: document.getElementById("message-model"),
+  },
+  cpu: {
+    wrap: document.getElementById("progress-cpu"),
+    fill: document.getElementById("fill-cpu"),
+    message: document.getElementById("message-cpu"),
+  },
+  gpu: {
+    wrap: document.getElementById("progress-gpu"),
+    fill: document.getElementById("fill-gpu"),
+    message: document.getElementById("message-gpu"),
+  },
+};
 
 let pollTimer = null;
-const ACTIVE_PHASES = new Set(["venv", "deps", "model", "verify"]);
+let activeComponent = "";
+const ACTIVE_PHASES = new Set(["venv", "deps", "torch", "model", "verify"]);
+const downloadButtons = { model: downloadModel, cpu: downloadCpu, gpu: downloadGpu };
 
 function stopPolling() {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
@@ -57,9 +181,26 @@ function showError(text) {
   installError.hidden = !text;
 }
 
+function hideProgress() {
+  for (const ui of Object.values(progressUi)) ui.wrap.hidden = true;
+}
+
+function showProgress(component, percent, message) {
+  const key = progressUi[component] ? component : activeComponent;
+  if (!progressUi[key]) return;
+  activeComponent = key;
+  for (const [name, ui] of Object.entries(progressUi)) {
+    const on = name === key;
+    ui.wrap.hidden = !on;
+    if (!on) continue;
+    if (typeof percent === "number") ui.fill.style.width = `${percent}%`;
+    ui.message.textContent = message || "";
+  }
+}
+
 function ensurePolling() {
   if (pollTimer) return;
-  pollTimer = setInterval(pollInstall, 3000);
+  pollTimer = setInterval(pollInstall, 1000);
 }
 
 async function pollInstall() {
@@ -67,25 +208,21 @@ async function pollInstall() {
     const response = await hana.api.fetch("kokoro-install");
     const body = await response.json().catch(() => ({}));
     if (!response.ok || body.error) throw new Error(body.error || "读不到安装进度。");
-    if (body.phase === "none") {
-      // 还没有状态文件：可能刚点完安装、进程还没写第一行，继续等
-      return;
-    }
-    progressWrap.hidden = false;
-    showError("");
-    if (typeof body.percent === "number") progressFill.style.width = `${body.percent}%`;
-    progressMessage.textContent = body.message || body.phase;
+    if (body.phase === "none") return;
+    if (body.component) activeComponent = body.component;
+    showProgress(activeComponent, body.percent, body.message || body.phase);
     if (body.phase === "done") {
       stopPolling();
-      progressMessage.textContent = "安装完成。";
-      setTimeout(() => location.reload(), 1500);
+      showProgress(activeComponent, 100, body.message || "已经具备。");
+      setTimeout(() => location.reload(), 800);
     } else if (body.phase === "failed") {
       stopPolling();
-      installBtn.disabled = false;
-      showError(body.message || "安装失败。");
+      setBusy(false);
+      showProgress(activeComponent, body.percent, body.message || "下载失败。");
+      showError("");
     } else if (ACTIVE_PHASES.has(body.phase)) {
-      // 进行中：保持按钮不可重复点，进度条持续跑
-      installBtn.disabled = true;
+      setBusy(true);
+      showError("");
     }
   } catch (error) {
     stopPolling();
@@ -93,27 +230,36 @@ async function pollInstall() {
   }
 }
 
-async function startInstall() {
-  installBtn.disabled = true;
+function setBusy(busy) {
+  for (const button of Object.values(downloadButtons)) button.disabled = busy;
+  deviceSelect.disabled = busy;
+}
+
+async function startInstall(component) {
+  setBusy(true);
   showError("");
   try {
     const response = await hana.api.fetch("kokoro-install", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ source: installSource.value, root: installRoot.value.trim() }),
+      body: JSON.stringify({ component, source: installSource.value, root: installRoot.value.trim() }),
     });
     const body = await response.json().catch(() => ({}));
-    if (!response.ok || !body.ok) throw new Error(body.error || "安装没有启动。");
-    progressWrap.hidden = false;
-    progressMessage.textContent = "安装已启动…";
-    pollTimer = setInterval(pollInstall, 3000);
+    if (!response.ok || !body.ok) throw new Error(body.error || "下载没有启动。");
+    activeComponent = component;
+    showProgress(component, 0, "下载已启动…");
+    ensurePolling();
   } catch (error) {
-    installBtn.disabled = false;
-    showError(error instanceof Error ? error.message : "安装没有启动。");
+    stopPolling();
+    hideProgress();
+    setBusy(false);
+    showError(error instanceof Error ? error.message : "下载没有启动。");
   }
 }
 
-installBtn.addEventListener("click", startInstall);
+downloadModel.addEventListener("click", () => startInstall("model"));
+downloadCpu.addEventListener("click", () => startInstall("cpu"));
+downloadGpu.addEventListener("click", () => startInstall("gpu"));
 
 async function callService(path) {
   const response = await hana.api.fetch(path, { method: "POST" });
@@ -123,21 +269,48 @@ async function callService(path) {
 }
 
 deviceSelect.addEventListener("change", () => {
-  if (deviceSelect.value === "cuda") {
-    deviceConfirmRow.hidden = false;
-  } else {
-    deviceConfirmRow.hidden = true;
-    startSwitch("cpu");
-  }
+  if (pageLocked) return;
+  startSwitch(deviceSelect.value === "cuda" ? "cuda" : "cpu");
 });
 
-deviceConfirmBtn.addEventListener("click", () => {
-  deviceConfirmRow.hidden = true;
-  startSwitch("cuda");
-});
+let pageLocked = false;
+
+function setPageLocked(locked) {
+  pageLocked = locked;
+  document.body.classList.toggle("page-locked", locked);
+  for (const element of document.querySelectorAll("button, input, select")) {
+    element.disabled = locked;
+  }
+  sourceDress.sync();
+  deviceDress.sync();
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForDevice(target) {
+  const deadline = Date.now() + 120000;
+  while (Date.now() < deadline) {
+    await wait(1000);
+    let response;
+    try {
+      response = await hana.api.fetch("kokoro-live", { signal: AbortSignal.timeout(10000) });
+    } catch {
+      continue;
+    }
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) continue;
+    if (!body.running) continue;
+    if (body.device === target) return;
+    if (body.device) throw new Error(target === "cuda" ? "服务起来了，但没有用上显卡。" : "服务起来了，但不是 CPU。");
+  }
+  throw new Error("切换超时，服务没有在限定时间内起来。");
+}
 
 async function startSwitch(target) {
-  deviceSelect.disabled = true;
+  setPageLocked(true);
+  showError("");
   setRow("kokoro-device", "loading", "正在切换…");
   try {
     const response = await hana.api.fetch("kokoro-device", {
@@ -147,12 +320,13 @@ async function startSwitch(target) {
     });
     const body = await response.json().catch(() => ({}));
     if (!response.ok || !body.ok) throw new Error(body.error || "切换失败。");
+    if (body.pending) await waitForDevice(target);
     await loadKokoroStatus();
   } catch (error) {
     showError(error instanceof Error ? error.message : "切换失败。");
     await loadKokoroStatus();
   } finally {
-    deviceSelect.disabled = false;
+    setPageLocked(false);
   }
 }
 
@@ -226,8 +400,14 @@ savePath.addEventListener("click", async () => {
 
 // ---- 状态区 ----
 
+function showPiece(id, ready) {
+  setRow(id, ready ? "ok" : "bad", ready ? "具备" : "未下载");
+}
+
 async function loadKokoroStatus() {
-  setRow("kokoro-installed", "loading", "正在查看…");
+  setRow("kokoro-model", "loading", "正在查看…");
+  setRow("kokoro-cpu", "loading", "正在查看…");
+  setRow("kokoro-gpu", "loading", "正在查看…");
   setRow("kokoro-running", "loading", "正在查看…");
   setRow("kokoro-device", "loading", "正在查看…");
   document.getElementById("kokoro-path").textContent = "—";
@@ -237,56 +417,57 @@ async function loadKokoroStatus() {
     if (!response.ok || body.error) throw new Error(body.error || "读不到状态。");
 
     installRoot.value = body.path || body.defaultPath || "";
-
-    setRow("kokoro-installed", body.installed ? "ok" : "bad",
-      body.installed ? (typeof body.dirGB === "number" ? `已安装（约 ${body.dirGB} GB）` : "已安装") : "没有安装");
     document.getElementById("kokoro-path").textContent = body.path || "—";
+
+    showPiece("kokoro-model", body.modelReady);
+    showPiece("kokoro-cpu", body.cpuReady);
+    showPiece("kokoro-gpu", body.gpuReady);
+
+    installSource.hidden = !!body.modelReady;
+    downloadModel.hidden = !!body.modelReady;
+    downloadCpu.hidden = !!body.cpuReady;
+    downloadGpu.hidden = !!body.gpuReady;
+
+    const cpuOption = deviceSelect.querySelector('option[value="cpu"]');
+    const gpuOption = deviceSelect.querySelector('option[value="cuda"]');
+    cpuOption.disabled = !body.cpuReady;
+    gpuOption.disabled = !body.gpuReady;
+    deviceSelect.hidden = !(body.cpuReady || body.gpuReady);
+    deviceSelect.value = body.targetDevice === "cuda" ? "cuda" : "cpu";
 
     if (body.running) {
       setRow("kokoro-running", "ok", body.foreign ? "服务运行中（另一个目录）" : "服务运行中");
-      if (body.device) {
-        setRow("kokoro-device", "ok", body.device === "cuda" ? "GPU" : "CPU");
-      } else {
-        setRow("kokoro-device", "loading", "服务没有上报运行模式");
-      }
+      if (body.device) setRow("kokoro-device", "ok", body.device === "cuda" ? "GPU" : "CPU");
+      else setRow("kokoro-device", "loading", "服务没有上报运行模式");
     } else {
       setRow("kokoro-running", "bad", "服务没有运行");
-      setRow("kokoro-device", "loading", "服务没有运行时看不出");
+      setRow("kokoro-device", "loading", body.targetDevice === "cuda" ? "未运行，当前选择 GPU" : "未运行，当前选择 CPU");
     }
 
-    // 启停按钮：已安装才显示；运行中显示停止，没运行显示启动；外来目录不能远程停
-    const showButtons = body.installed;
-    startBtn.hidden = !showButtons || body.running;
-    stopBtn.hidden = !showButtons || !body.running || body.foreign;
-    // 自动停止开关：已安装才显示
-    autostopRow.hidden = !body.installed;
+    const canRun = !!body.installed;
+    startBtn.hidden = !canRun || body.running;
+    stopBtn.hidden = !canRun || !body.running || body.foreign;
+    autostopRow.hidden = !canRun;
     autostopToggle.checked = body.autoStop !== false;
-    // 运行模式切换：已安装才显示
-    deviceSelect.hidden = !body.installed;
-    deviceSelect.value = body.targetDevice === "cuda" ? "cuda" : "cpu";
 
-    if (!body.installed) {
-      installSection.hidden = false;
-      installRoot.placeholder = body.defaultPath || "D:\\models\\kokoro";
-      // 恢复上次没装完的进度：先查一次，进行中就持续轮询
-      const response = await hana.api.fetch("kokoro-install");
-      const state = await response.json().catch(() => ({}));
-      if (state && ACTIVE_PHASES.has(state.phase)) {
-        ensurePolling();
-        await pollInstall();
-      } else if (state && state.phase === "failed") {
-        progressWrap.hidden = false;
-        if (typeof state.percent === "number") progressFill.style.width = `${state.percent}%`;
-        progressMessage.textContent = state.message || "安装失败。";
-        showError(state.message || "安装失败。");
-        installBtn.disabled = false;
-      }
+    const stateResponse = await hana.api.fetch("kokoro-install");
+    const state = await stateResponse.json().catch(() => ({}));
+    if (state && ACTIVE_PHASES.has(state.phase)) {
+      ensurePolling();
+      await pollInstall();
+    } else if (state && state.phase === "failed") {
+      if (state.component) activeComponent = state.component;
+      showProgress(activeComponent, state.percent, state.message || "下载失败。");
+      showError("");
     } else {
-      installSection.hidden = true;
-      progressWrap.hidden = true;
+      hideProgress();
     }
+    sourceDress.sync();
+    deviceDress.sync();
   } catch (error) {
-    setRow("kokoro-installed", "bad", "读不到状态");
+    setRow("kokoro-model", "bad", "读不到状态");
+    setRow("kokoro-cpu", "bad", "读不到状态");
+    setRow("kokoro-gpu", "bad", "读不到状态");
     setRow("kokoro-running", "bad", "读不到状态");
     setRow("kokoro-device", "loading", error instanceof Error ? error.message : "读不到状态。");
   }

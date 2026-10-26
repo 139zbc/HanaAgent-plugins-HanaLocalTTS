@@ -117,7 +117,8 @@ function renderPrefs(prefs) {
 
 function renderKokoro(state) {
   if (!state.installed) {
-    setValue(ui.kokoro, '没有安装', 'muted');
+    if (state.modelReady) setValue(ui.kokoro, '当前运行环境未下载', 'muted');
+    else setValue(ui.kokoro, '模型未下载', 'muted');
     setValue(ui.device, '—', 'muted');
     return;
   }
@@ -154,7 +155,9 @@ function renderHint(prefs, state) {
     lines.push('暂时读不到多媒体里的设置，这里显示的是本 App 存的旧值。');
   }
   if (state && !state.installed) {
-    lines.push('本地 Kokoro 还没装。装好后中文音色更自然，还能用显卡加速，安装入口在这个 App 的设置里。');
+    lines.push(state.modelReady
+      ? '当前选的运行环境还是未下载。去这个 App 的设置里下载。'
+      : '模型还是未下载。去这个 App 的设置里下载。');
   }
   ui.hint.textContent = lines.join(' ');
   ui.hint.hidden = lines.length === 0;

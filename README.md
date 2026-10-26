@@ -11,13 +11,15 @@
 
 ## 当前状态
 
-M12-1 已完成：卡片面板会显示当前朗读来源、声音、语速，以及本地 Kokoro 的安装和运行模式。
+设置页把模型、CPU 运行环境、GPU 运行环境分开显示。状态用「具备」和「未下载」。同一时间只跑一套；已经下好的那套，切换时不再下载。
 
 本地模型装在 `D:\ProgramData\OH-WorkSpace\hanako\kokoro-zh`，不在这个 Git 仓库里。服务脚本的存档副本是 [kokoro/server.py](kokoro/server.py)。正在跑的那份在模型目录里，改脚本时两份要一起改。
 
 完整计划见 [PLAN.md](PLAN.md)。
 
-下一步：M12-2，卡片面板上加「试读一句」和「启动 / 停止服务」，不用跳去设置页。计划见 [PLAN.md](PLAN.md)。
+改完插件后，把 `hana-local-tts` 复制到 `C:\Users\Fantasy\.hanako\apps\hana-local-tts`，Hana 里打开的才是这份。
+
+下一步：在 Hana 里打开这个 App 的设置，确认三行状态。看过效果后再用 Git 存档。
 
 ## 开发约定
 

@@ -151,16 +151,70 @@ async function listVoices(sdk) {
   return parseVoices(stdout);
 }
 
+function runtimePythonScript(root, device) {
+  const folder = device === "cuda" ? ".venv-cuda" : ".venv-cpu";
+  const expect = device === "cuda" ? "cuda" : "cpu";
+  return `
+function Get-TorchKind([string]$venv) {
+  $marker = Join-Path $venv 'runtime.json'
+  if (Test-Path -LiteralPath $marker) {
+    try {
+      $parsed = Get-Content -LiteralPath $marker -Raw -Encoding UTF8 | ConvertFrom-Json
+      if ($parsed.device -eq 'cuda' -or $parsed.device -eq 'cpu') { return [string]$parsed.device }
+    } catch {}
+  }
+  $site = Join-Path (Join-Path $venv 'Lib') 'site-packages'
+  if (-not (Test-Path -LiteralPath $site)) { return '' }
+  $dist = @(Get-ChildItem -LiteralPath $site -Directory -Filter 'torch-*.dist-info' -ErrorAction SilentlyContinue | Select-Object -First 1)
+  if ($dist.Count -eq 0) { return '' }
+  if ($dist[0].Name -like '*+cu*') { return 'cuda' }
+  return 'cpu'
+}
+$namedVenv = Join-Path '${quotePs(root)}' '${folder}'
+$python = Join-Path (Join-Path $namedVenv 'Scripts') 'python.exe'
+if (-not (Test-Path -LiteralPath $python)) {
+  $legacyVenv = Join-Path '${quotePs(root)}' '.venv'
+  if ((Get-TorchKind $legacyVenv) -eq '${expect}') {
+    $python = Join-Path (Join-Path $legacyVenv 'Scripts') 'python.exe'
+  }
+}
+`.trim();
+}
+
 function kokoroStatusScript(root) {
   return `
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $root = '${quotePs(root)}'
-$python = Join-Path $root '.venv\\Scripts\\python.exe'
-$server = Join-Path $root 'server.py'
+function Get-TorchKind([string]$venv) {
+  $py = Join-Path (Join-Path $venv 'Scripts') 'python.exe'
+  if (-not (Test-Path -LiteralPath $py)) { return '' }
+  $marker = Join-Path $venv 'runtime.json'
+  if (Test-Path -LiteralPath $marker) {
+    try {
+      $parsed = Get-Content -LiteralPath $marker -Raw -Encoding UTF8 | ConvertFrom-Json
+      if ($parsed.device -eq 'cuda' -or $parsed.device -eq 'cpu') { return [string]$parsed.device }
+    } catch {}
+  }
+  $site = Join-Path (Join-Path $venv 'Lib') 'site-packages'
+  if (-not (Test-Path -LiteralPath $site)) { return '' }
+  $dist = @(Get-ChildItem -LiteralPath $site -Directory -Filter 'torch-*.dist-info' -ErrorAction SilentlyContinue | Select-Object -First 1)
+  if ($dist.Count -eq 0) { return '' }
+  if ($dist[0].Name -like '*+cu*') { return 'cuda' }
+  return 'cpu'
+}
+$cpuReady = ((Get-TorchKind (Join-Path $root '.venv-cpu')) -eq 'cpu') -or ((Get-TorchKind (Join-Path $root '.venv')) -eq 'cpu')
+$gpuReady = ((Get-TorchKind (Join-Path $root '.venv-cuda')) -eq 'cuda') -or ((Get-TorchKind (Join-Path $root '.venv')) -eq 'cuda')
 $model = Join-Path (Join-Path (Join-Path (Join-Path $root 'hf-cache') 'models--hexgrad--Kokoro-82M-v1.1-zh') 'snapshots') 'installed'
 $model = Join-Path $model 'kokoro-v1_1-zh.pth'
-$installed = (Test-Path -LiteralPath $python) -and (Test-Path -LiteralPath $server) -and (Test-Path -LiteralPath $model)
+$modelReady = Test-Path -LiteralPath $model
+if (-not $modelReady) {
+  $snapRoot = Join-Path (Join-Path (Join-Path $root 'hf-cache') 'models--hexgrad--Kokoro-82M-v1.1-zh') 'snapshots'
+  if (Test-Path -LiteralPath $snapRoot) {
+    $hit = @(Get-ChildItem -LiteralPath $snapRoot -Recurse -Filter 'kokoro-v1_1-zh.pth' -File -ErrorAction SilentlyContinue | Select-Object -First 1)
+    if ($hit.Count -gt 0) { $modelReady = $true }
+  }
+}
 $dirGB = $null
 if (Test-Path -LiteralPath $root) {
   $sum = (Get-ChildItem -LiteralPath $root -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
@@ -180,12 +234,13 @@ try {
 } catch {}
 # 服务在跑，但可能不是这个目录起的：对比服务自报的 root
 $foreign = $false
-if ($running -and $installed -and $servedRoot) {
+$canRun = $modelReady -and ($cpuReady -or $gpuReady)
+if ($running -and $canRun -and $servedRoot) {
   $a = [IO.Path]::GetFullPath($servedRoot).TrimEnd('\')
   $b = [IO.Path]::GetFullPath($root).TrimEnd('\')
   if ($a -ne $b) { $foreign = $true }
 }
-$result = @{ installed = $installed; dirGB = $dirGB; running = $running; device = $device; foreign = $foreign }
+$result = @{ model = $modelReady; cpu = $cpuReady; gpu = $gpuReady; dirGB = $dirGB; running = $running; device = $device; foreign = $foreign }
 $result | ConvertTo-Json -Compress
 `.trim();
 }
@@ -208,14 +263,16 @@ $d
 
 async function kokoroStatus(sdk) {
   const root = await kokoroRoot(sdk);
-  const result = { installed: false, dirGB: null, running: false, foreign: false, device: "", path: root, defaultPath: await defaultKokoroRoot(sdk), autoStop: await autoStopEnabled(sdk), targetDevice: await kokoroDevice(sdk), gpuAvailable: null };
+  const result = { installed: false, modelReady: false, cpuReady: false, gpuReady: false, dirGB: null, running: false, foreign: false, device: "", path: root, defaultPath: await defaultKokoroRoot(sdk), autoStop: await autoStopEnabled(sdk), targetDevice: await kokoroDevice(sdk) };
   const executable = await powershellPath(sdk);
   if (!executable) return result;
   try {
     const { stdout } = await runPowerShell(executable, kokoroStatusScript(root), 30000);
     const parsed = JSON.parse(String(stdout || "").trim());
     if (parsed) {
-      result.installed = parsed.installed === true;
+      result.modelReady = parsed.model === true;
+      result.cpuReady = parsed.cpu === true;
+      result.gpuReady = parsed.gpu === true;
       if (typeof parsed.dirGB === "number") result.dirGB = parsed.dirGB;
       result.running = parsed.running === true;
       result.foreign = parsed.foreign === true;
@@ -224,8 +281,45 @@ async function kokoroStatus(sdk) {
   } catch (error) {
     await sdk.logger.error(`kokoro status check failed: ${failureText(error)}`);
   }
-  await sdk.logger.info(`kokoro status: installed=${result.installed} dirGB=${result.dirGB} running=${result.running} foreign=${result.foreign} device=${result.device || "-"}`);
+  result.installed = result.modelReady && (result.targetDevice === "cuda" ? result.gpuReady : result.cpuReady);
+  await sdk.logger.info(`kokoro status: model=${result.modelReady} cpu=${result.cpuReady} gpu=${result.gpuReady} installed=${result.installed} running=${result.running} device=${result.device || "-"}`);
   return result;
+}
+
+// 只在用户点 GPU「下载」时查显卡。不在打开设置时查，避免 nvidia-smi 弹出命令行窗口。
+async function checkGpuHardware(sdk) {
+  const executable = await powershellPath(sdk);
+  if (!executable) return { ok: false, error: "找不到 Windows PowerShell。" };
+  const script = `
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$smi = Join-Path (Join-Path $env:SystemRoot 'System32') 'nvidia-smi.exe'
+$found = $false
+if (Test-Path -LiteralPath $smi) {
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $smi
+  $psi.Arguments = '--query-gpu=name --format=csv,noheader'
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  $psi.UseShellExecute = $false
+  $psi.CreateNoWindow = $true
+  $proc = [Diagnostics.Process]::Start($psi)
+  $out = $proc.StandardOutput.ReadToEnd()
+  $proc.WaitForExit()
+  if ($out) { $found = $true }
+}
+if (-not $found) {
+  $gpus = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*NVIDIA*' })
+  if ($gpus.Count -gt 0) { $found = $true }
+}
+if ($found) { 'gpu-ok' } else { 'no-gpu' }
+`.trim();
+  try {
+    const { stdout } = await runPowerShell(executable, script, 20000);
+    return String(stdout || "").includes("gpu-ok") ? { ok: true } : { ok: false, error: "这台电脑没有 NVIDIA 显卡。" };
+  } catch (error) {
+    return { ok: false, error: failureText(error) };
+  }
 }
 
 async function readSpeechPrefs(sdk) {
@@ -304,7 +398,6 @@ function kokoroVoiceId(value) {
 }
 
 function kokoroScript(root, textFile, wavFile, voice, rate, play = true, device = "cpu") {
-  const python = path.join(root, ".venv", "Scripts", "python.exe");
   const server = path.join(root, "server.py");
   const player = play
     ? `$player = New-Object System.Media.SoundPlayer '${quotePs(wavFile)}'
@@ -322,10 +415,11 @@ function Test-Kokoro {
     return $false
   }
 }
+${runtimePythonScript(root, device)}
 if (-not (Test-Kokoro)) {
-  if (-not (Test-Path -LiteralPath '${quotePs(python)}')) { throw '找不到本地 Kokoro。' }
+  if (-not (Test-Path -LiteralPath $python)) { throw '当前选择的运行环境未下载。' }
   $env:KOKORO_DEVICE = '${quotePs(device)}'
-  Start-Process -FilePath '${quotePs(python)}' -ArgumentList '${quotePs(server)}' -WorkingDirectory '${quotePs(root)}' -WindowStyle Hidden
+  Start-Process -FilePath $python -ArgumentList '${quotePs(server)}' -WorkingDirectory '${quotePs(root)}' -WindowStyle Hidden
   $deadline = (Get-Date).AddSeconds(80)
   do {
     Start-Sleep -Milliseconds 500
@@ -635,7 +729,6 @@ foreach ($p in $all) {
 
 // 启动脚本：拉起 server.py，等健康检查通过。输出 ok。device 是目标模式（cpu/cuda）。
 function kokoroStartScript(root, device) {
-  const python = path.join(root, ".venv", "Scripts", "python.exe");
   const server = path.join(root, "server.py");
   return `
 $ErrorActionPreference = 'Stop'
@@ -646,10 +739,11 @@ function Test-Kokoro {
     return $health.StatusCode -eq 200
   } catch { return $false }
 }
+${runtimePythonScript(root, device)}
 if (Test-Kokoro) { 'ok'; exit }
-if (-not (Test-Path -LiteralPath '${quotePs(python)}')) { throw '找不到本地 Kokoro，请先安装。' }
+if (-not (Test-Path -LiteralPath $python)) { throw '当前选择的运行环境未下载。' }
 $env:KOKORO_DEVICE = '${quotePs(device)}'
-Start-Process -FilePath '${quotePs(python)}' -ArgumentList '${quotePs(server)}' -WorkingDirectory '${quotePs(root)}' -WindowStyle Hidden
+Start-Process -FilePath $python -ArgumentList '${quotePs(server)}' -WorkingDirectory '${quotePs(root)}' -WindowStyle Hidden
 $deadline = (Get-Date).AddSeconds(120)
 do {
   Start-Sleep -Milliseconds 500
@@ -742,7 +836,7 @@ const KOKORO_INSTALL_SOURCES = { modelscope: "modelscope", "hf-mirror": "hf-mirr
 let installStartedAt = 0;
 
 async function readInstallState(sdk, root) {
-  const state = { phase: "none", message: "", percent: null, error: null };
+  const state = { phase: "none", message: "", percent: null, error: null, component: "" };
   const executable = await powershellPath(sdk);
   if (!executable) return state;
   const script = `
@@ -766,6 +860,7 @@ if (Test-Path -LiteralPath $p) {
         if (typeof parsed.message === "string") state.message = parsed.message;
         if (typeof parsed.percent === "number") state.percent = parsed.percent;
         if (typeof parsed.error === "string") state.error = parsed.error;
+        if (typeof parsed.component === "string") state.component = parsed.component;
       }
     }
   } catch {
@@ -774,10 +869,13 @@ if (Test-Path -LiteralPath $p) {
   return state;
 }
 
-async function startKokoroInstall(sdk, root, source, workDir) {
-  // 同一时刻只允许一个安装；上次启动 30 分钟内不重复启动
+async function startKokoroInstall(sdk, root, source, component, workDir) {
+  // 同一时刻只允许一个下载。上一件已经完成或失败时，可以接着下另一件。
   if (installStartedAt && Date.now() - installStartedAt < 30 * 60 * 1000) {
-    throw new Error("已有一次安装在进行中，请等它完成或失败后重试。");
+    const current = await readInstallState(sdk, root);
+    if (current.phase !== "done" && current.phase !== "failed" && current.phase !== "none") {
+      throw new Error("已有一次下载在进行中，请等它完成或失败后重试。");
+    }
   }
   const executable = await powershellPath(sdk);
   if (!executable) throw new Error("找不到 Windows PowerShell。");
@@ -806,12 +904,12 @@ if (-not (Test-Path -LiteralPath $base)) {
 }
 if (-not (Test-Path -LiteralPath $base)) { throw '找不到 Python 3.12。请先安装 Python 3.12（推荐用 uv）。' }
 $installer = Join-Path $root 'install.py'
-Start-Process -FilePath $base -ArgumentList @($installer, '--root', $root, '--source', '${quotePs(source)}') -WorkingDirectory $root -WindowStyle Hidden
+Start-Process -FilePath $base -ArgumentList @($installer, '--root', $root, '--source', '${quotePs(source)}', '--component', '${quotePs(component)}') -WorkingDirectory $root -WindowStyle Hidden
 'ok'
 `.trim();
     const { stdout } = await runPowerShell(executable, script, 120000);
     if (!String(stdout || "").includes("ok")) throw new Error("安装进程没有启动。");
-    await sdk.logger.info(`kokoro install started root=${root} source=${source}`);
+    await sdk.logger.info(`kokoro install started root=${root} source=${source} component=${component}`);
     return { ok: true };
   } catch (error) {
     installStartedAt = 0;
@@ -865,75 +963,6 @@ async function kokoroDevice(sdk) {
   }
 }
 
-// 检查 GPU 是否可用（有 NVIDIA 显卡且驱动支持）。
-// nvidia-smi 不一定在沙箱进程的 PATH 里，先试绝对路径，再用 WMI 查硬件兑底。
-async function checkGpuAvailable(sdk) {
-  const executable = await powershellPath(sdk);
-  if (!executable) return { ok: false, error: "找不到 Windows PowerShell。" };
-  const script = `
-$ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
-$smi = Join-Path $env:SystemRoot 'System32\\nvidia-smi.exe'
-$found = $false
-if (Test-Path -LiteralPath $smi) {
-  $out = & $smi --query-gpu=name --format=csv,noheader 2>$null
-  if ($out) { $found = $true }
-}
-if (-not $found) {
-  $gpus = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*NVIDIA*' })
-  if ($gpus.Count -gt 0) { $found = $true }
-}
-if ($found) { 'gpu-ok' } else { 'no-gpu' }
-`.trim();
-  try {
-    const { stdout } = await runPowerShell(executable, script, 20000);
-    return String(stdout || "").includes("gpu-ok") ? { ok: true } : { ok: false, error: "没有检测到 NVIDIA 显卡。" };
-  } catch (error) {
-    return { ok: false, error: failureText(error) };
-  }
-}
-
-// 重装 torch：target 为 'cuda' 装 cu130 版（约 3.5GB），'cpu' 装默认版（约 200MB）。
-// 写进度到 install-state.json，复用安装页的轮询展示。
-async function reinstallTorch(sdk, root, target) {
-  const python = path.join(root, ".venv", "Scripts", "python.exe");
-  const pipArgs = target === "cuda"
-    ? ["torch==2.14.1", "--index-url", "https://download.pytorch.org/whl/cu130"]
-    : ["torch==2.14.1"];
-  const message = target === "cuda" ? "正在安装 GPU 版 PyTorch，约 3.5GB，需要几分钟…" : "正在装回 CPU 版 PyTorch，约 200MB…";
-  // 先卸载：CPU 版和 GPU 版版本号相同（2.14.1），不卸的话 pip 会认为“已装”直接跳过。
-  // pip 用 Start-Process -Wait 跑：用 & 直接调用会成为沙箱 PowerShell 的孙进程被 job 掐掉；M8 就是这么成功的。
-  const pipList = ["-m", "pip", "install", "--disable-pip-version-check", "--no-warn-script-location", ...pipArgs];
-  const pipListPs = pipList.map((a) => `'${quotePs(a)}'`).join(", ");
-  const script = `
-$ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
-$root = '${quotePs(root)}'
-$state = Join-Path $root 'install-state.json'
-$log = Join-Path $root 'torch-switch.log'
-$py = '${quotePs(python)}'
-'begin' | Out-File -LiteralPath $log -Encoding utf8
-$progress = @{ phase = 'switch-torch'; message = '${quotePs(message)}'; percent = 5 }
-$progress | ConvertTo-Json -Compress | Out-File -LiteralPath $state -Encoding utf8
-'uninstalling' | Out-File -LiteralPath $log -Append -Encoding utf8
-$un = Start-Process -FilePath $py -ArgumentList @('-m','pip','uninstall','-y','torch') -WindowStyle Hidden -PassThru -Wait
-"uninstall exit=$($un.ExitCode)" | Out-File -LiteralPath $log -Append -Encoding utf8
-'installing' | Out-File -LiteralPath $log -Append -Encoding utf8
-$ins = Start-Process -FilePath $py -ArgumentList @(${pipListPs}) -WindowStyle Hidden -PassThru -Wait
-"install exit=$($ins.ExitCode)" | Out-File -LiteralPath $log -Append -Encoding utf8
-if ($ins.ExitCode -ne 0) { throw 'PyTorch 安装失败。' }
-$done = @{ phase = 'switch-torch-done'; message = '安装完成'; percent = 100 }
-$done | ConvertTo-Json -Compress | Out-File -LiteralPath $state -Encoding utf8
-'done' | Out-File -LiteralPath $log -Append -Encoding utf8
-'ok'
-`.trim();
-  const executable = await powershellPath(sdk);
-  if (!executable) throw new Error("找不到 Windows PowerShell。");
-  const { stdout } = await runPowerShell(executable, script, 30 * 60 * 1000);
-  if (!String(stdout || "").includes("ok")) throw new Error("安装没有成功。");
-  return { ok: true };
-}
-
 async function cleanupOrphanKokoro(sdk) {
   const marker = await readSessionMarker(sdk);
   if (!marker.hanaPid) return false;
@@ -969,6 +998,55 @@ async function startKokoroService(sdk) {
   if (!String(stdout || "").includes("ok")) throw new Error("启动没有成功。");
   await ensureWatcher(sdk);
   return { ok: true };
+}
+
+// 只拉起进程，不等模型加载完。切换请求要马上返回，避免页面把慢启动当成失败。
+function kokoroSpawnScript(root, device) {
+  const server = path.join(root, "server.py");
+  return `
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+${runtimePythonScript(root, device)}
+if (-not (Test-Path -LiteralPath $python)) { throw '当前选择的运行环境未下载。' }
+$env:KOKORO_DEVICE = '${quotePs(device)}'
+Start-Process -FilePath $python -ArgumentList '${quotePs(server)}' -WorkingDirectory '${quotePs(root)}' -WindowStyle Hidden
+'spawned'
+`.trim();
+}
+
+async function spawnKokoroService(sdk) {
+  const root = await kokoroRoot(sdk);
+  const executable = await powershellPath(sdk);
+  if (!executable) throw new Error("找不到 Windows PowerShell。");
+  const device = await kokoroDevice(sdk);
+  const { stdout } = await runPowerShell(executable, kokoroSpawnScript(root, device), 20000);
+  if (!String(stdout || "").includes("spawned")) throw new Error("启动没有成功。");
+  await ensureWatcher(sdk);
+  return { ok: true };
+}
+
+async function readKokoroLive(sdk) {
+  const executable = await powershellPath(sdk);
+  if (!executable) return { running: false, device: "" };
+  const script = `
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+try {
+  $health = Invoke-WebRequest -Uri 'http://127.0.0.1:${KOKORO_PORT}/health' -UseBasicParsing -TimeoutSec 2
+  if ($health.StatusCode -ne 200) { 'down'; exit }
+  $parsed = $health.Content | ConvertFrom-Json
+  if ($parsed.device -eq 'cuda') { 'cuda' } elseif ($parsed.device -eq 'cpu') { 'cpu' } else { 'up' }
+} catch { 'down' }
+`.trim();
+  try {
+    const { stdout } = await runPowerShell(executable, script, 8000);
+    const text = String(stdout || "");
+    if (text.includes("cuda")) return { running: true, device: "cuda" };
+    if (text.includes("cpu")) return { running: true, device: "cpu" };
+    return { running: false, device: "" };
+  } catch {
+    return { running: false, device: "" };
+  }
 }
 
 async function stopKokoroService(sdk) {
@@ -1112,11 +1190,21 @@ export default defineApp(async (sdk) => {
       }
       try {
         const source = KOKORO_INSTALL_SOURCES[body && body.source] || "modelscope";
+        const component = body && body.component;
+        if (component !== "model" && component !== "cpu" && component !== "gpu") {
+          return c.json({ ok: false, error: "要指定下载模型、CPU 运行环境或 GPU 运行环境。" }, 400);
+        }
         const root = cleanInstallPath(body && body.root) || (await kokoroRoot(sdk));
-        const status = await kokoroStatus(sdk);
-        if (status.installed) return c.json({ ok: false, error: "已经安装过了，不需要再装。" }, 400);
         await sdk.config.setMany({ kokoroRoot: root });
-        const result = await startKokoroInstall(sdk, root, source, sdk.dataDir);
+        const status = await kokoroStatus(sdk);
+        if (component === "model" && status.modelReady) return c.json({ ok: false, error: "模型已经具备。" }, 400);
+        if (component === "cpu" && status.cpuReady) return c.json({ ok: false, error: "CPU 运行环境已经具备。" }, 400);
+        if (component === "gpu" && status.gpuReady) return c.json({ ok: false, error: "GPU 运行环境已经具备。" }, 400);
+        if (component === "gpu") {
+          const gpu = await checkGpuHardware(sdk);
+          if (!gpu.ok) return c.json({ ok: false, error: gpu.error }, 400);
+        }
+        const result = await startKokoroInstall(sdk, root, source, component, sdk.dataDir);
         return c.json(result);
       } catch (error) {
         return c.json({ ok: false, error: failureText(error) }, 500);
@@ -1145,7 +1233,9 @@ export default defineApp(async (sdk) => {
     app.post("/kokoro-start", async (c) => {
       try {
         const status = await kokoroStatus(sdk);
-        if (!status.installed) return c.json({ ok: false, error: "还没有安装 Kokoro。" }, 400);
+        if (!status.modelReady) return c.json({ ok: false, error: "模型未下载。" }, 400);
+        if (status.targetDevice === "cuda" && !status.gpuReady) return c.json({ ok: false, error: "GPU 运行环境未下载。" }, 400);
+        if (status.targetDevice !== "cuda" && !status.cpuReady) return c.json({ ok: false, error: "CPU 运行环境未下载。" }, 400);
         if (status.running && !status.foreign) return c.json({ ok: true, alreadyRunning: true });
         const result = await startKokoroService(sdk);
         return c.json(result);
@@ -1166,6 +1256,11 @@ export default defineApp(async (sdk) => {
       }
     });
 
+    app.get("/kokoro-live", async (c) => {
+      const live = await readKokoroLive(sdk);
+      return c.json(live);
+    });
+
     app.post("/kokoro-device", async (c) => {
       let body;
       try {
@@ -1176,46 +1271,22 @@ export default defineApp(async (sdk) => {
       const target = body && body.device === "cuda" ? "cuda" : "cpu";
       try {
         const status = await kokoroStatus(sdk);
-        if (!status.installed) return c.json({ ok: false, error: "还没有安装 Kokoro。" }, 400);
-        const current = await kokoroDevice(sdk);
+        const current = status.targetDevice === "cuda" ? "cuda" : "cpu";
+        if (target === "cuda" && !status.gpuReady) return c.json({ ok: false, error: "GPU 运行环境未下载。" }, 400);
+        if (target === "cpu" && !status.cpuReady) return c.json({ ok: false, error: "CPU 运行环境未下载。" }, 400);
         if (current === target) return c.json({ ok: true, device: target, unchanged: true });
-        if (target === "cuda") {
-          const gpu = await checkGpuAvailable(sdk);
-          if (!gpu.ok) return c.json({ ok: false, error: gpu.error }, 400);
+        if (status.foreign) return c.json({ ok: false, error: "服务是从另一个目录启动的，不能在这里换。" }, 400);
+        const wasRunning = status.running === true;
+        if (!wasRunning) {
+          await sdk.config.setMany({ kokoroDevice: target });
+          await sdk.logger.info(`kokoro device saved as ${target} (service was stopped)`);
+          return c.json({ ok: true, device: target, pending: false });
         }
-        // 切换前停服务（不包含 watcher：watcher 盯的是 Hana，不是服务）
         await stopKokoroService(sdk);
-        const root = await kokoroRoot(sdk);
-        try {
-          await reinstallTorch(sdk, root, target);
-        } catch (error) {
-          // 装不上就回滚到 CPU 版 torch，保证环境可用
-          await sdk.logger.error(`torch switch to ${target} failed: ${failureText(error)}`);
-          if (target === "cuda") {
-            try { await reinstallTorch(sdk, root, "cpu"); } catch (rollbackError) {
-              await sdk.logger.error(`rollback to cpu failed: ${failureText(rollbackError)}`);
-            }
-          }
-          return c.json({ ok: false, error: `切换失败：${failureText(error)}` }, 500);
-        }
         await sdk.config.setMany({ kokoroDevice: target });
-        // 重启服务并用 /health 验证实际模式
-        const startResult = await startKokoroService(sdk);
-        if (!startResult.ok) return c.json({ ok: false, error: "服务重启失败，请手动点启动。" }, 500);
-        const after = await kokoroStatus(sdk);
-        const actual = after.device || "cpu";
-        if (target === "cuda" && actual !== "cuda") {
-          await sdk.logger.error(`cuda requested but service reports ${actual}; rolling back`);
-          await stopKokoroService(sdk);
-          try { await reinstallTorch(sdk, root, "cpu"); } catch (rollbackError) {
-            await sdk.logger.error(`rollback to cpu failed: ${failureText(rollbackError)}`);
-          }
-          await sdk.config.setMany({ kokoroDevice: "cpu" });
-          await startKokoroService(sdk).catch(() => {});
-          return c.json({ ok: false, error: "GPU 版启动后没有生效，已回退到 CPU。" }, 500);
-        }
-        await sdk.logger.info(`kokoro device switched to ${target} (service reports ${actual})`);
-        return c.json({ ok: true, device: actual });
+        await spawnKokoroService(sdk);
+        await sdk.logger.info(`kokoro device switch started toward ${target}`);
+        return c.json({ ok: true, device: target, pending: true });
       } catch (error) {
         return c.json({ ok: false, error: failureText(error) }, 500);
       }

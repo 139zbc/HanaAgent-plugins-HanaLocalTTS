@@ -5,19 +5,65 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>本地语音朗读</title>
   <link rel="stylesheet" href="./assets/app.css?v=3">
-  <link rel="stylesheet" href="./assets/settings.css?v=3">
+  <link rel="stylesheet" href="./assets/settings.css?v=8">
 </head>
 <body>
   <main>
-    <p class="hint">朗读来源、声音和语速在 Hana 的「多媒体 → 语音合成 → 本地语音朗读」里设置。这里显示本地 Kokoro 的安装情况。</p>
+    <p class="hint">朗读来源、声音和语速在 Hana 的「多媒体 → 语音合成 → 本地语音朗读」里设置。这里分开看模型、CPU 运行环境、GPU 运行环境。具备就能用，未下载就点下载。同一时间只跑一套。</p>
 
     <section class="group">
       <h2>本地 Kokoro</h2>
       <div class="card">
-        <div class="row">
-          <div class="text">
-            <span class="row-title">安装状态</span>
-            <span class="row-desc" id="kokoro-installed" data-state="loading">正在查看…</span>
+        <div class="piece" data-component="model">
+          <div class="row">
+            <div class="text">
+              <span class="row-title">模型</span>
+              <span class="row-desc" id="kokoro-model" data-state="loading">正在查看…</span>
+            </div>
+            <span class="actions">
+              <select id="install-source">
+                <option value="modelscope" selected>ModelScope（国内，推荐）</option>
+                <option value="hf-mirror">HF 镜像（国内备选）</option>
+                <option value="huggingface">HuggingFace（海外直连）</option>
+              </select>
+              <button id="download-model" type="button" class="small" hidden>下载</button>
+            </span>
+          </div>
+          <div class="progress-wrap" id="progress-model" hidden>
+            <div class="progress-bar"><div class="progress-fill" id="fill-model"></div></div>
+            <p class="hint" id="message-model"></p>
+          </div>
+        </div>
+
+        <div class="piece" data-component="cpu">
+          <div class="row">
+            <div class="text">
+              <span class="row-title">CPU 运行环境</span>
+              <span class="row-desc" id="kokoro-cpu" data-state="loading">正在查看…</span>
+            </div>
+            <span class="actions">
+              <button id="download-cpu" type="button" class="small" hidden>下载</button>
+            </span>
+          </div>
+          <div class="progress-wrap" id="progress-cpu" hidden>
+            <div class="progress-bar"><div class="progress-fill" id="fill-cpu"></div></div>
+            <p class="hint" id="message-cpu"></p>
+          </div>
+        </div>
+
+        <div class="piece" data-component="gpu">
+          <div class="row">
+            <div class="text">
+              <span class="row-title">GPU 运行环境</span>
+              <span class="row-desc" id="kokoro-gpu" data-state="loading">正在查看…</span>
+            </div>
+            <span class="actions">
+              <button id="download-gpu" type="button" class="small" hidden>下载</button>
+            </span>
+          </div>
+          <div class="progress-wrap" id="progress-gpu" hidden>
+            <div class="progress-bar"><div class="progress-fill" id="fill-gpu"></div></div>
+            <p class="hint" id="message-gpu"></p>
           </div>
         </div>
 
@@ -52,16 +98,6 @@
           </span>
         </div>
 
-        <div class="row" id="device-confirm-row" hidden>
-          <div class="text">
-            <span class="row-title">切到 GPU</span>
-            <span class="row-desc" id="device-confirm-text">要下 3.5GB，服务会停几分钟。</span>
-          </div>
-          <span class="actions">
-            <button id="device-confirm" type="button" class="small">确认切换</button>
-          </span>
-        </div>
-
         <div class="row" id="autostop-row" hidden>
           <div class="text">
             <span class="row-title">自动停止</span>
@@ -72,6 +108,7 @@
             <span class="slider"></span>
           </label>
         </div>
+        <p class="hint" id="install-error" role="alert" hidden></p>
       </div>
     </section>
 
@@ -93,37 +130,6 @@
       </div>
     </section>
 
-    <section class="group" id="install-section" hidden>
-      <h2>安装 Kokoro</h2>
-      <div class="card">
-        <p class="hint">还没有安装。选一个下载来源，点「安装」。大约要下载 1–1.5GB，需要几分钟到几十分钟。</p>
-
-        <div class="row">
-          <div class="text">
-            <span class="row-title">下载来源</span>
-          </div>
-          <span class="actions">
-            <select id="install-source">
-              <option value="modelscope" selected>ModelScope（国内，推荐）</option>
-              <option value="hf-mirror">HF 镜像（国内备选）</option>
-              <option value="huggingface">HuggingFace（海外直连）</option>
-            </select>
-          </span>
-        </div>
-
-        <div class="row">
-          <span class="actions only">
-            <button id="install-btn" type="button" class="primary">安装</button>
-          </span>
-        </div>
-        <div class="progress-wrap" id="progress-wrap" hidden>
-          <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
-          <p class="hint" id="progress-message"></p>
-        </div>
-        <p class="hint" id="install-error" role="alert" hidden></p>
-      </div>
-    </section>
-
     <section class="group">
       <h2>供应商试验</h2>
       <div class="card">
@@ -141,6 +147,6 @@
       </div>
     </section>
   </main>
-  <script type="module" src="./assets/settings.js"></script>
+  <script type="module" src="./assets/settings.js?v=9"></script>
 </body>
 </html>

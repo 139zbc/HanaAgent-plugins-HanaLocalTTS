@@ -57,7 +57,10 @@ h2 {
 
 /* 卡内分隔线：两端缩进，跟宿主一致。
    宿主用的是 height + background（不是 border-top），粗细取 --border-width。 */
-.row + .row::before {
+.row + .row::before,
+.piece + .piece::before,
+.piece + .row::before,
+.row + .piece::before {
   content: "";
   position: absolute;
   top: 0;
@@ -66,6 +69,8 @@ h2 {
   height: var(--tts-border-width);
   background: var(--tts-card-divider);
 }
+
+.piece { position: relative; }
 
 /* 只有控件的条目（安装、试一下合成）不需要左边距缩进 */
 .row:has(> .actions.only)::before {
@@ -173,6 +178,12 @@ h2 {
 .switch input:checked + .slider { background: var(--tts-accent); }
 .switch input:checked + .slider::before { transform: translateX(16px); }
 .switch input:focus-visible + .slider { outline: 2px solid var(--tts-accent); outline-offset: 2px; }
+.switch:has(input:disabled) { cursor: default; opacity: 0.55; }
+body.page-locked { cursor: wait; }
+body.page-locked button,
+body.page-locked input,
+body.page-locked select,
+body.page-locked .tts-select-trigger { pointer-events: none; }
 
 /* 路径输入行 */
 .path-row {
@@ -181,6 +192,100 @@ h2 {
   gap: 8px;
   align-items: center;
   width: 100%;
+}
+
+/* 下拉：对齐宿主设置页。触发条在行右侧，点开后是浮层，当前项用强调色。 */
+.tts-select { position: relative; width: 220px; max-width: 100%; }
+.tts-select.is-short { width: 112px; }
+.tts-select-native {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  pointer-events: none;
+}
+.tts-select-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  min-height: var(--tts-control-height);
+  padding: 0 10px;
+  text-align: left;
+  font: inherit;
+  font-size: 13px;
+  color: var(--tts-text);
+  background: var(--bg, var(--tts-surface));
+  border: var(--tts-border-width) solid var(--tts-card-border);
+  border-radius: var(--tts-control-radius);
+  corner-shape: squircle;
+  cursor: pointer;
+}
+.tts-select-trigger:hover,
+.tts-select-trigger[aria-expanded="true"] {
+  background: var(--overlay-subtle, rgba(42, 38, 34, 0.04));
+}
+.tts-select-trigger:disabled { opacity: 0.55; cursor: default; }
+.tts-select-value {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tts-select-chevron {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--tts-text-2);
+  transition: transform 0.15s ease;
+}
+.tts-select-trigger[aria-expanded="true"] .tts-select-chevron { transform: rotate(180deg); }
+.tts-select-popup {
+  position: fixed;
+  z-index: 30;
+  max-height: 260px;
+  overflow: auto;
+  padding: 4px;
+  background: var(--bg-card, var(--tts-surface));
+  border: var(--tts-border-width) solid var(--tts-card-border);
+  border-radius: var(--tts-control-radius);
+  corner-shape: squircle;
+  box-shadow: var(--shadow, 0 8px 24px rgba(42, 38, 34, 0.12));
+}
+.tts-select-option {
+  display: block;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: calc(4px * var(--corner-radius-scale, 1));
+  corner-shape: squircle;
+  background: transparent;
+  color: var(--tts-text);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.45;
+  text-align: left;
+  cursor: pointer;
+}
+.tts-select-option:hover:not(:disabled),
+.tts-select-option[data-active] {
+  background: color-mix(in srgb, var(--tts-accent) 12%, transparent);
+}
+.tts-select-option[aria-selected="true"] {
+  color: var(--tts-accent);
+  font-weight: 600;
+}
+.tts-select-option:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 /* 安装进度 */
