@@ -7,13 +7,49 @@
   <link rel="stylesheet" href="./assets/panel.css">
 </head>
 <body>
-  <main>
-    <h1>本地语音朗读</h1>
-    <p id="startup-status" role="status">正在加载…</p>
+  <main class="panel">
+    <header class="head">
+      <h1>本地语音朗读</h1>
+      <p class="sub" id="panel-sub">正在读取状态…</p>
+    </header>
+
+    <section class="card" id="panel-body">
+      <div class="row">
+        <span class="label">朗读来源</span>
+        <span class="value" id="v-engine" data-state="loading">—</span>
+      </div>
+      <div class="row">
+        <span class="label">声音</span>
+        <span class="value" id="v-voice" data-state="loading">—</span>
+      </div>
+      <div class="row">
+        <span class="label">语速</span>
+        <span class="value" id="v-rate" data-state="loading">—</span>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="row">
+        <span class="label">本地 Kokoro</span>
+        <span class="value" id="v-kokoro" data-state="loading">—</span>
+      </div>
+      <div class="row">
+        <span class="label">运行模式</span>
+        <span class="value" id="v-device" data-state="loading">—</span>
+      </div>
+    </section>
+
+    <p class="hint" id="panel-hint" hidden></p>
+
+    <section class="card error" id="panel-error" hidden>
+      <p class="error-text" id="panel-error-text"></p>
+      <button type="button" class="small" id="panel-retry">重新读取</button>
+    </section>
   </main>
   <script>
     window.addEventListener('error', () => {
-      document.getElementById('startup-status').textContent = '页面没起来。请看 App 详情里的报错。';
+      const sub = document.getElementById('panel-sub');
+      if (sub) sub.textContent = '页面没起来。请看 App 详情里的报错。';
     }, true);
   </script>
   <script type="module" src="./assets/panel.js"></script>

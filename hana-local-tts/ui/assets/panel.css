@@ -1,4 +1,116 @@
-html, body { margin: 0; min-height: 100%; background: var(--bg, #f7f3eb); color: var(--text, #3b342b); font-family: system-ui, sans-serif; }
-main { box-sizing: border-box; min-height: 100%; padding: 24px; }
-h1 { margin: 0 0 12px; font-size: 20px; font-weight: 500; }
-p { margin: 0; line-height: 1.6; }
+/* 卡片面板样式。颜色、圆角、字体都走宿主变量，跟着主题走；括号里是宿主没给时的兜底值。 */
+html, body {
+  margin: 0;
+  background: transparent;
+  color: var(--text, #3b342b);
+  font-family: var(--font-ui, system-ui, "PingFang SC", "Microsoft YaHei", sans-serif);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+}
+
+.panel {
+  display: grid;
+  gap: 10px;
+  box-sizing: border-box;
+  max-width: 420px;
+  padding: 16px;
+}
+
+.head h1 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.head .sub {
+  margin: 3px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary, #7a7266);
+}
+
+.card {
+  display: grid;
+  padding: 2px 12px;
+  border: 1px solid var(--border, rgba(0, 0, 0, 0.1));
+  border-radius: var(--radius-lg, 12px);
+  background: var(--bg-card, var(--bg-surface, transparent));
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 76px 1fr;
+  gap: 10px;
+  align-items: baseline;
+  padding: 9px 0;
+}
+
+.row + .row {
+  border-top: 1px solid var(--border-muted, rgba(0, 0, 0, 0.07));
+}
+
+.label {
+  font-size: 12px;
+  color: var(--text-secondary, #7a7266);
+}
+
+.value {
+  font-size: 13px;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.value[data-state="loading"] {
+  color: var(--text-secondary, #7a7266);
+}
+
+/* 状态点：绿=正常，红=有问题，灰=不适用 */
+.value[data-state="ok"]::before,
+.value[data-state="bad"]::before,
+.value[data-state="muted"]::before {
+  content: "●";
+  margin-right: 6px;
+  font-size: 9px;
+  vertical-align: 1px;
+}
+
+.value[data-state="ok"]::before { color: var(--success, #5a9a6a); }
+.value[data-state="bad"]::before { color: var(--color-err, #c4645d); }
+.value[data-state="muted"]::before { color: var(--text-secondary, #7a7266); }
+
+.hint {
+  margin: 0;
+  padding: 0 2px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary, #7a7266);
+}
+
+.card.error {
+  gap: 8px;
+  padding: 10px 12px;
+  border-color: var(--color-err, #c4645d);
+}
+
+.error-text {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--color-err, #c4645d);
+}
+
+button.small {
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 12px;
+  border: 1px solid var(--border, rgba(0, 0, 0, 0.14));
+  border-radius: var(--radius-sm, 5px);
+  background: transparent;
+  color: var(--text, #3b342b);
+  cursor: pointer;
+}
+
+button.small:hover {
+  border-color: var(--accent, #537d96);
+  color: var(--accent, #537d96);
+}
