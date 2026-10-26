@@ -26,6 +26,9 @@
         <span class="label">语速</span>
         <span class="value" id="v-rate" data-state="loading">—</span>
       </div>
+      <div class="foot">
+        <button type="button" class="primary" id="btn-speak">试读一句</button>
+      </div>
     </section>
 
     <section class="card">
@@ -37,7 +40,12 @@
         <span class="label">运行模式</span>
         <span class="value" id="v-device" data-state="loading">—</span>
       </div>
+      <div class="foot" id="service-foot" hidden>
+        <button type="button" class="small" id="btn-service">启动服务</button>
+      </div>
     </section>
+
+    <p class="message" id="panel-message" role="status" hidden></p>
 
     <p class="hint" id="panel-hint" hidden></p>
 

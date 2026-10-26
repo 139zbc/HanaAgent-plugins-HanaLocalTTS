@@ -86,6 +86,72 @@ html, body {
   color: var(--text-secondary, #7a7266);
 }
 
+/* 卡片底部的操作区 */
+.foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 9px 0;
+}
+
+.foot:empty {
+  display: none;
+}
+
+button {
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 14px;
+  border: 1px solid var(--border, rgba(0, 0, 0, 0.14));
+  border-radius: var(--radius-sm, 5px);
+  background: transparent;
+  color: var(--text, #3b342b);
+  cursor: pointer;
+  transition: opacity 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--accent, #537d96);
+  color: var(--accent, #537d96);
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+button.primary {
+  border-color: transparent;
+  background: var(--accent, #537d96);
+  color: var(--on-accent, #fff);
+}
+
+button.primary:hover:not(:disabled) {
+  border-color: transparent;
+  color: var(--on-accent, #fff);
+  opacity: 0.9;
+}
+
+/* 操作结果：成功绿、失败红 */
+.message {
+  margin: 0;
+  padding: 0 2px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.message[data-state="ok"] {
+  color: var(--success, #5a9a6a);
+}
+
+.message[data-state="bad"] {
+  color: var(--color-err, #c4645d);
+}
+
+.message[data-state="busy"] {
+  color: var(--text-secondary, #7a7266);
+}
+
 .card.error {
   gap: 8px;
   padding: 10px 12px;
@@ -100,17 +166,6 @@ html, body {
 }
 
 button.small {
-  font: inherit;
   font-size: 12px;
-  padding: 4px 12px;
-  border: 1px solid var(--border, rgba(0, 0, 0, 0.14));
-  border-radius: var(--radius-sm, 5px);
-  background: transparent;
-  color: var(--text, #3b342b);
-  cursor: pointer;
-}
-
-button.small:hover {
-  border-color: var(--accent, #537d96);
-  color: var(--accent, #537d96);
+  padding: 5px 14px;
 }

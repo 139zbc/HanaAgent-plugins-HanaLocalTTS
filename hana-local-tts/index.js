@@ -241,6 +241,48 @@ async function readSpeechPrefs(sdk) {
   }
 }
 
+// 宿主「多媒体 → 语音合成」里真正生效的那份设置：模型、声音、语速。
+// M6 之后声音和语速归宿主管，App 自己 config 里那份已经是陈旧值，面板要显示宿主这份。
+async function readHostSpeechPrefs(sdk) {
+  const executable = await powershellPath(sdk);
+  if (!executable) return null;
+  const script = `
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$p = Join-Path (Join-Path (Join-Path $env:USERPROFILE '.hanako') 'user') 'preferences.json'
+$j = Get-Content -LiteralPath $p -Raw -Encoding UTF8 | ConvertFrom-Json
+$sg = $j.speechGeneration
+$id = [string]$sg.defaultSpeechModel.id
+$mode = $sg.providerDefaults.'hana-local-tts'.models.$id.modes.text2speech
+$result = @{ modelId = $id; speed = $null; voice = '' }
+if ($null -ne $mode) {
+  if ($null -ne $mode.speed) { $result.speed = [string]$mode.speed }
+  if ($null -ne $mode.voice) { $result.voice = [string]$mode.voice }
+}
+$result | ConvertTo-Json -Compress
+`.trim();
+  try {
+    const { stdout } = await runPowerShell(executable, script, 15000);
+    const parsed = JSON.parse(String(stdout || "").trim());
+    if (!parsed || !parsed.modelId) return null;
+    const modelId = String(parsed.modelId);
+    const voice = typeof parsed.voice === "string" ? parsed.voice : "";
+    const speed = typeof parsed.speed === "string" || typeof parsed.speed === "number"
+      ? clampRate(parsed.speed)
+      : 1;
+    return {
+      modelId,
+      engine: modelId === "kokoro" ? "kokoro" : "system",
+      voice: modelId === "kokoro" ? "" : voice,
+      rate: speed,
+      kokoroVoice: modelId === "kokoro" ? kokoroVoiceId(voice) : KOKORO_DEFAULT_VOICE,
+    };
+  } catch (error) {
+    await sdk.logger.error(`host speech prefs unavailable: ${failureText(error)}`);
+    return null;
+  }
+}
+
 function cleanInstallPath(value) {
   const text = typeof value === "string" ? value.trim() : "";
   if (!text) return "";
@@ -537,6 +579,17 @@ async function registerSpeechProvider(sdk) {
   }
 }
 
+// 宿主给语音任务的状态值是 done / failed（不是 completed）。判定要认这两个值。
+function speechTaskFailed(task) {
+  const status = task && typeof task.status === "string" ? task.status : "";
+  return status === "failed" || status === "error";
+}
+
+function speechTaskDone(task) {
+  const status = task && typeof task.status === "string" ? task.status : "";
+  return status === "done" || status === "completed";
+}
+
 async function waitForSpeechTask(sdk, taskId) {
   const deadline = Date.now() + KOKORO_TIMEOUT_MS;
   let task = null;
@@ -678,8 +731,8 @@ async function synthesize(sdk, text) {
   const taskId = result?.tasks?.[0]?.taskId;
   if (!taskId) return textResult("宿主没有返回语音任务。");
   const task = await waitForSpeechTask(sdk, taskId);
-  if (task?.status !== "completed") {
-    return textResult(task?.failReason || "语音任务没有在限定时间内完成。");
+  if (!speechTaskDone(task)) {
+    return textResult(task?.failReason || (speechTaskFailed(task) ? "语音合成没有成功。" : "语音任务没有在限定时间内完成。"));
   }
   await sdk.logger.info(`speak ok task=${taskId}`);
   return textResult("已朗读。");
@@ -1015,14 +1068,14 @@ export default defineApp(async (sdk) => {
     app.post("/probe", async (c) => {
       if (speechProviderError) return c.json({ ok: false, error: speechProviderError }, 500);
       try {
-        const result = await requestSpeech(sdk, "这是本地语音供应商测试。");
+        const result = await requestSpeech(sdk, "欢迎使用Hana Agent本地语音朗读 A P P");
         const taskId = result?.tasks?.[0]?.taskId;
         if (!taskId) return c.json({ ok: false, error: "宿主没有返回语音任务。", result }, 500);
         const task = await waitForSpeechTask(sdk, taskId);
-        const completed = task?.status === "completed";
+        const completed = speechTaskDone(task);
         return c.json({
           ok: completed,
-          error: completed ? "" : (task?.failReason || "语音任务没有在限定时间内完成。"),
+          error: completed ? "" : (task?.failReason || (speechTaskFailed(task) ? "语音合成没有成功。" : "语音任务没有在限定时间内完成。")),
           taskId,
           status: task?.status || "pending",
         }, completed ? 200 : 500);
@@ -1197,8 +1250,16 @@ export default defineApp(async (sdk) => {
     app.get("/voices", async (c) => {
       try {
         const voices = await listVoices(sdk);
-        const prefs = await readSpeechPrefs(sdk);
-        return c.json({ voices, kokoroVoices: KOKORO_VOICES, ...prefs });
+        const local = await readSpeechPrefs(sdk);
+        // 宿主那份优先：面板要显示多媒体页面里真正生效的值。
+        const host = await readHostSpeechPrefs(sdk);
+        const prefs = host || local;
+        return c.json({
+          voices,
+          kokoroVoices: KOKORO_VOICES,
+          ...prefs,
+          prefsSource: host ? "host" : "app",
+        });
       } catch (error) {
         return c.json({ error: failureText(error) }, 500);
       }
