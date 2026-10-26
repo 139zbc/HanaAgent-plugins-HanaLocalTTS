@@ -208,7 +208,7 @@ $d
 
 async function kokoroStatus(sdk) {
   const root = await kokoroRoot(sdk);
-  const result = { installed: false, dirGB: null, running: false, foreign: false, device: "", path: root, defaultPath: await defaultKokoroRoot(sdk) };
+  const result = { installed: false, dirGB: null, running: false, foreign: false, device: "", path: root, defaultPath: await defaultKokoroRoot(sdk), autoStop: await autoStopEnabled(sdk) };
   const executable = await powershellPath(sdk);
   if (!executable) return result;
   try {
@@ -308,6 +308,7 @@ async function writeSpeechFile(sdk, text, voice, rate, wavFile, engine, play = t
       const kokoroVoice = kokoroVoiceId(voice);
       const root = await kokoroRoot(sdk);
       await runPowerShell(executable, kokoroScript(root, textFile, wavFile, kokoroVoice, rate, play), KOKORO_TIMEOUT_MS);
+      await ensureWatcher(sdk);
     } finally {
       await rm(textFile, { force: true });
     }
@@ -551,6 +552,88 @@ function speedTypeError(error) {
   return message.includes("speech speed must be a finite number");
 }
 
+// 停止脚本：按端口找 PID，连子进程一起停。输出停掉的 PID 列表（base64）。
+function kokoroStopScript() {
+  return `
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$roots = @(Get-NetTCPConnection -LocalPort ${KOKORO_PORT} -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique)
+if ($roots.Count -eq 0) { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('none')); exit }
+$all = New-Object System.Collections.Generic.HashSet[int]
+$queue = New-Object System.Collections.Generic.Queue[int]
+foreach ($r in $roots) { [void]$all.Add([int]$r); $queue.Enqueue([int]$r) }
+while ($queue.Count -gt 0) {
+  $current = $queue.Dequeue()
+  $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $current" -ErrorAction SilentlyContinue)
+  foreach ($child in $children) {
+    $cid = [int]$child.ProcessId
+    if (-not $all.Contains($cid)) { [void]$all.Add($cid); $queue.Enqueue($cid) }
+  }
+}
+$stopped = @()
+# 先杀父，再杀子，避免孤儿化
+foreach ($p in $all) {
+  try { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue; $stopped += $p } catch {}
+}
+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($stopped -join ',')))
+`.trim();
+}
+
+// 启动脚本：拉起 server.py，等健康检查通过。输出 ok。
+function kokoroStartScript(root) {
+  const python = path.join(root, ".venv", "Scripts", "python.exe");
+  const server = path.join(root, "server.py");
+  return `
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+function Test-Kokoro {
+  try {
+    $health = Invoke-WebRequest -Uri 'http://127.0.0.1:${KOKORO_PORT}/health' -UseBasicParsing -TimeoutSec 2
+    return $health.StatusCode -eq 200
+  } catch { return $false }
+}
+if (Test-Kokoro) { 'ok'; exit }
+if (-not (Test-Path -LiteralPath '${quotePs(python)}')) { throw '找不到本地 Kokoro，请先安装。' }
+Start-Process -FilePath '${quotePs(python)}' -ArgumentList '${quotePs(server)}' -WorkingDirectory '${quotePs(root)}' -WindowStyle Hidden
+$deadline = (Get-Date).AddSeconds(80)
+do {
+  Start-Sleep -Milliseconds 500
+  if (Test-Kokoro) { break }
+} while ((Get-Date) -lt $deadline)
+if (-not (Test-Kokoro)) { throw '启动超时。' }
+'ok'
+`.trim();
+}
+
+// 守护脚本：盯住 Hana 主进程，它退出就停掉 Kokoro（连子进程一起停）。
+// 由 App 用 Start-Process 拉起，独立于 Hana 生命周期。
+function kokoroWatchScript() {
+  return `
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$watched = Get-Process HanaAgent -ErrorAction SilentlyContinue | Select-Object -First 1
+if (-not $watched) { exit }
+while ($true) {
+  Start-Sleep -Seconds 5
+  if (-not (Get-Process -Id $watched.Id -ErrorAction SilentlyContinue)) {
+    $roots = @(Get-NetTCPConnection -LocalPort ${KOKORO_PORT} -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique)
+    foreach ($top in $roots) {
+      $queue = New-Object System.Collections.Generic.Queue[int]
+      $seen = New-Object System.Collections.Generic.HashSet[int]
+      [void]$seen.Add([int]$top); $queue.Enqueue([int]$top)
+      while ($queue.Count -gt 0) {
+        $cur = $queue.Dequeue()
+        $kids = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $cur" -ErrorAction SilentlyContinue)
+        foreach ($k in $kids) { $kid = [int]$k.ProcessId; if (-not $seen.Contains($kid)) { [void]$seen.Add($kid); $queue.Enqueue($kid) } }
+      }
+      foreach ($p in $seen) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }
+    }
+    exit
+  }
+}
+`.trim();
+}
+
 async function savedSpeed(sdk) {
   const executable = await powershellPath(sdk);
   if (!executable) return 1;
@@ -681,6 +764,156 @@ Start-Process -FilePath $base -ArgumentList @($installer, '--root', $root, '--so
   }
 }
 
+let watcherRunning = false;
+
+// 方案 A：把“这次 Hana 会话”的标记写进状态文件。
+// App 启动时若发现 8765 在跑，但标记里的 Hana 进程已经不在了，说明是上次遗留，先停掉。
+async function sessionMarkerPath(sdk) {
+  return path.join(sdk.dataDir, "kokoro-session.json");
+}
+
+async function readSessionMarker(sdk) {
+  try {
+    const text = await readFile(await sessionMarkerPath(sdk), "utf8");
+    const parsed = JSON.parse(text);
+    return {
+      hanaPid: typeof parsed.hanaPid === "number" ? parsed.hanaPid : null,
+      watcherStartedAt: typeof parsed.watcherStartedAt === "number" ? parsed.watcherStartedAt : null,
+    };
+  } catch {
+    return { hanaPid: null, watcherStartedAt: null };
+  }
+}
+
+async function writeSessionMarker(sdk, hanaPid) {
+  const file = await sessionMarkerPath(sdk);
+  await mkdir(path.dirname(file), { recursive: true });
+  await writeFile(file, JSON.stringify({ hanaPid, watcherStartedAt: Date.now() }), "utf8");
+}
+
+async function autoStopEnabled(sdk) {
+  try {
+    const all = await sdk.config.getAll();
+    return all?.kokoroAutoStop !== false;
+  } catch {
+    return true;
+  }
+}
+
+async function cleanupOrphanKokoro(sdk) {
+  const marker = await readSessionMarker(sdk);
+  if (!marker.hanaPid) return false;
+  // 标记里的 Hana 进程还活着 → 不是遗留，不动
+  const executable = await powershellPath(sdk);
+  if (!executable) return false;
+  const aliveScript = `
+$ErrorActionPreference = 'Stop'
+if (Get-Process -Id ${marker.hanaPid} -ErrorAction SilentlyContinue) { 'alive' } else { 'dead' }
+`.trim();
+  try {
+    const { stdout } = await runPowerShell(executable, aliveScript, 15000);
+    if (String(stdout || "").includes("alive")) return false;
+  } catch {
+    return false;
+  }
+  // 上次的 Hana 已经不在了：若 8765 还在跑就是遗留，停掉
+  const status = await kokoroStatus(sdk);
+  if (status.running) {
+    await sdk.logger.info("cleaning up orphan kokoro from previous session");
+    await stopKokoroService(sdk);
+    return true;
+  }
+  return false;
+}
+
+async function startKokoroService(sdk) {
+  const root = await kokoroRoot(sdk);
+  const executable = await powershellPath(sdk);
+  if (!executable) throw new Error("找不到 Windows PowerShell。");
+  const { stdout } = await runPowerShell(executable, kokoroStartScript(root), 90000);
+  if (!String(stdout || "").includes("ok")) throw new Error("启动没有成功。");
+  await ensureWatcher(sdk);
+  return { ok: true };
+}
+
+async function stopKokoroService(sdk) {
+  const executable = await powershellPath(sdk);
+  if (!executable) throw new Error("找不到 Windows PowerShell。");
+  const { stdout } = await runPowerShell(executable, kokoroStopScript(), 30000);
+  const b64 = String(stdout || "").trim().split(/\r?\n/).filter((line) => /^[A-Za-z0-9+/=]+$/.test(line.trim())).pop() || "";
+  const stopped = b64 ? Buffer.from(b64, "base64").toString("utf8") : "none";
+  await sdk.logger.info(`kokoro stopped: ${stopped}`);
+  return { ok: true, stopped: stopped === "none" ? [] : stopped.split(",").filter(Boolean) };
+}
+
+async function stopWatcher(sdk) {
+  const executable = await powershellPath(sdk);
+  if (!executable) return;
+  const script = `
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$watchers = @(Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like '*kokoro-watch.ps1*' })
+foreach ($w in $watchers) { Stop-Process -Id $w.ProcessId -Force -ErrorAction SilentlyContinue }
+$watchers.Count
+`.trim();
+  try {
+    const { stdout } = await runPowerShell(executable, script, 15000);
+    watcherRunning = false;
+    const count = Number(String(stdout || "").trim());
+    await sdk.logger.info(`kokoro watcher stopped (${count})`);
+    return count || 0;
+  } catch (error) {
+    await sdk.logger.error(`kokoro watcher stop failed: ${failureText(error)}`);
+    return 0;
+  }
+}
+
+async function ensureWatcher(sdk) {
+  if (watcherRunning) return;
+  if (!(await autoStopEnabled(sdk))) return;
+  const executable = await powershellPath(sdk);
+  if (!executable) return;
+  // 先查一遍：App 重载后内存标志归零，但旧 watcher 可能还在跑，不重复拉
+  const checkScript = `
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$existing = @(Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like '*kokoro-watch.ps1*' })
+"count=$($existing.Count)"
+`.trim();
+  try {
+    const { stdout } = await runPowerShell(executable, checkScript, 15000);
+    if (/count=[1-9]/.test(String(stdout || ""))) {
+      watcherRunning = true;
+      return;
+    }
+  } catch {
+    // 查不到就继续尝试拉起
+  }
+  // watcher 脚本很长（base64 后超过命令行 32KB 上限），必须先写文件再用 -File 执行
+  const scriptFile = path.join(sdk.dataDir, "kokoro-watch.ps1");
+  await mkdir(path.dirname(scriptFile), { recursive: true });
+  await writeFile(scriptFile, kokoroWatchScript(), "utf8");
+  const script = `
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$hana = Get-Process HanaAgent -ErrorAction SilentlyContinue | Select-Object -First 1
+if (-not $hana) { 'no-hana'; exit }
+Start-Process -FilePath '${quotePs(executable)}' -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', '${quotePs(scriptFile)}') -WindowStyle Hidden
+"watcher-spawned $($hana.Id)"
+`.trim();
+  try {
+    const { stdout } = await runPowerShell(executable, script, 15000);
+    const text = String(stdout || "").trim();
+    if (text.includes("no-hana")) return;
+    watcherRunning = true;
+    const pidMatch = text.match(/watcher-spawned (\d+)/);
+    if (pidMatch) await writeSessionMarker(sdk, Number(pidMatch[1]));
+    await sdk.logger.info("kokoro watcher started");
+  } catch (error) {
+    await sdk.logger.error(`kokoro watcher failed to start: ${failureText(error)}`);
+  }
+}
+
 export default defineApp(async (sdk) => {
   await sdk.logger.info("hana-local-tts loaded");
   try {
@@ -690,6 +923,9 @@ export default defineApp(async (sdk) => {
     await sdk.logger.error(`system voices unavailable: ${failureText(error)}`);
   }
   await registerSpeechProvider(sdk);
+  // 方案 A：先清理上次遗留的服务，再拉守护进程（方案 B）
+  await cleanupOrphanKokoro(sdk);
+  await ensureWatcher(sdk);
 
   await sdk.routes.register((app) => {
     app.get("/probe", (c) => c.json({ ready: !speechProviderError, error: speechProviderError }));
@@ -769,6 +1005,56 @@ export default defineApp(async (sdk) => {
       }
       await sdk.logger.info(`kokoro root set to ${root}`);
       return c.json({ ok: true, root });
+    });
+
+    app.post("/kokoro-start", async (c) => {
+      try {
+        const status = await kokoroStatus(sdk);
+        if (!status.installed) return c.json({ ok: false, error: "还没有安装 Kokoro。" }, 400);
+        if (status.running && !status.foreign) return c.json({ ok: true, alreadyRunning: true });
+        const result = await startKokoroService(sdk);
+        return c.json(result);
+      } catch (error) {
+        return c.json({ ok: false, error: failureText(error) }, 500);
+      }
+    });
+
+    app.post("/kokoro-stop", async (c) => {
+      try {
+        const status = await kokoroStatus(sdk);
+        if (!status.running) return c.json({ ok: true, stopped: [] });
+        if (status.foreign) return c.json({ ok: false, error: "服务是从另一个目录启动的，不能在这里停。" }, 400);
+        const result = await stopKokoroService(sdk);
+        return c.json(result);
+      } catch (error) {
+        return c.json({ ok: false, error: failureText(error) }, 500);
+      }
+    });
+
+    app.put("/kokoro-autostop", async (c) => {
+      let body;
+      try {
+        body = await c.req.json();
+      } catch {
+        return c.json({ error: "请求不是 JSON。" }, 400);
+      }
+      const enabled = !!(body && body.enabled === true);
+      try {
+        await sdk.config.setMany({ kokoroAutoStop: enabled });
+        if (enabled) {
+          const status = await kokoroStatus(sdk);
+          if (status.running) {
+            await ensureWatcher(sdk);
+            await sdk.logger.info("kokoro watcher enabled by user");
+          }
+        } else {
+          await stopWatcher(sdk);
+          await sdk.logger.info("kokoro watcher disabled by user");
+        }
+        return c.json({ ok: true, enabled });
+      } catch (error) {
+        return c.json({ error: failureText(error) }, 500);
+      }
     });
 
     app.get("/voices", async (c) => {

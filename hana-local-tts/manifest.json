@@ -56,6 +56,11 @@
             "type": "string",
             "title": "Kokoro 安装路径",
             "default": ""
+          },
+          "kokoroAutoStop": {
+            "type": "boolean",
+            "title": "Hana 退出时自动停止 Kokoro",
+            "default": true
           }
         }
       },

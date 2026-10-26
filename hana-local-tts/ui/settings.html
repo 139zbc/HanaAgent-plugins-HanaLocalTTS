@@ -21,6 +21,10 @@
       <div class="row">
         <span class="label">运行状态</span>
         <span class="value" id="kokoro-running" data-state="loading">正在查看…</span>
+        <span class="actions">
+          <button id="kokoro-start" type="button" class="small" hidden>启动</button>
+          <button id="kokoro-stop" type="button" class="small" hidden>停止</button>
+        </span>
       </div>
 
       <div class="row">
@@ -31,6 +35,15 @@
       <div class="row">
         <span class="label">运行模式</span>
         <span class="value" id="kokoro-device" data-state="loading">正在查看…</span>
+      </div>
+
+      <div class="row" id="autostop-row" hidden>
+        <span class="label">自动停止</span>
+        <span class="value">Hana 退出时自动停止服务</span>
+        <label class="switch">
+          <input id="autostop-toggle" type="checkbox" checked>
+          <span class="slider"></span>
+        </label>
       </div>
     </section>
 

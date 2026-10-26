@@ -21,6 +21,14 @@ button { font: inherit; justify-self: start; padding: 6px 14px; }
 select, input[type="text"] { font: inherit; font-size: 13px; width: 100%; padding: 4px 8px; box-sizing: border-box; }
 .path-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; }
 button.small { padding: 3px 10px; font-size: 13px; }
+.actions { margin-left: auto; display: inline-flex; gap: 6px; }
+#autostop-row .value { font-size: 13px; color: var(--text-secondary, #7a7266); }
+.switch { position: relative; display: inline-block; width: 36px; height: 20px; margin-left: auto; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.slider { position: absolute; inset: 0; border-radius: 10px; background: var(--border, rgba(0,0,0,0.2)); transition: 0.2s; cursor: pointer; }
+.slider::before { content: ""; position: absolute; width: 14px; height: 14px; left: 3px; top: 3px; border-radius: 50%; background: #fff; transition: 0.2s; }
+.switch input:checked + .slider { background: #3aa675; }
+.switch input:checked + .slider::before { transform: translateX(16px); }
 .progress-wrap { display: grid; gap: 6px; margin-top: 6px; }
 .progress-bar { height: 6px; border-radius: 3px; background: var(--border, rgba(0, 0, 0, 0.1)); overflow: hidden; }
 .progress-fill { height: 100%; width: 0; background: #3aa675; transition: width 0.5s; }

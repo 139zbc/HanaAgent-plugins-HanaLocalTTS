@@ -30,6 +30,10 @@ const installSection = document.getElementById("install-section");
 const installSource = document.getElementById("install-source");
 const installRoot = document.getElementById("install-root");
 const pathHint = document.getElementById("path-hint");
+const startBtn = document.getElementById("kokoro-start");
+const stopBtn = document.getElementById("kokoro-stop");
+const autostopRow = document.getElementById("autostop-row");
+const autostopToggle = document.getElementById("autostop-toggle");
 const installBtn = document.getElementById("install-btn");
 const savePath = document.getElementById("save-path");
 const progressWrap = document.getElementById("progress-wrap");
@@ -107,6 +111,61 @@ async function startInstall() {
 
 installBtn.addEventListener("click", startInstall);
 
+async function callService(path) {
+  const response = await hana.api.fetch(path, { method: "POST" });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok || !body.ok) throw new Error(body.error || "操作没有成功。");
+  return body;
+}
+
+autostopToggle.addEventListener("change", async () => {
+  const enabled = autostopToggle.checked;
+  autostopToggle.disabled = true;
+  try {
+    const response = await hana.api.fetch("kokoro-autostop", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok || !body.ok) throw new Error(body.error || "没有保存。");
+    showError("");
+  } catch (error) {
+    autostopToggle.checked = !enabled;
+    showError(error instanceof Error ? error.message : "没有保存。");
+  } finally {
+    autostopToggle.disabled = false;
+  }
+});
+
+startBtn.addEventListener("click", async () => {
+  startBtn.disabled = true;
+  startBtn.textContent = "启动中…";
+  try {
+    await callService("kokoro-start");
+    await loadKokoroStatus();
+  } catch (error) {
+    showError(error instanceof Error ? error.message : "启动失败。");
+  } finally {
+    startBtn.disabled = false;
+    startBtn.textContent = "启动";
+  }
+});
+
+stopBtn.addEventListener("click", async () => {
+  stopBtn.disabled = true;
+  stopBtn.textContent = "停止中…";
+  try {
+    await callService("kokoro-stop");
+    await loadKokoroStatus();
+  } catch (error) {
+    showError(error instanceof Error ? error.message : "停止失败。");
+  } finally {
+    stopBtn.disabled = false;
+    stopBtn.textContent = "停止";
+  }
+});
+
 savePath.addEventListener("click", async () => {
   savePath.disabled = true;
   try {
@@ -156,6 +215,14 @@ async function loadKokoroStatus() {
       setRow("kokoro-running", "bad", "服务没有运行");
       setRow("kokoro-device", "loading", "服务没有运行时看不出");
     }
+
+    // 启停按钮：已安装才显示；运行中显示停止，没运行显示启动；外来目录不能远程停
+    const showButtons = body.installed;
+    startBtn.hidden = !showButtons || body.running;
+    stopBtn.hidden = !showButtons || !body.running || body.foreign;
+    // 自动停止开关：已安装才显示
+    autostopRow.hidden = !body.installed;
+    autostopToggle.checked = body.autoStop !== false;
 
     if (!body.installed) {
       installSection.hidden = false;
