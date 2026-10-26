@@ -82,6 +82,6 @@
       }
     ]
   },
-  "icon": "assets/icon.jpg",
+  "icon": "assets/icon.png",
   "minAppVersion": "1.2.1-beta"
 }
