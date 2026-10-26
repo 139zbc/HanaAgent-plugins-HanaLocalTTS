@@ -1,0 +1,172 @@
+/* 本地语音朗读 App 的共享样式。面板（panel.html）和设置页（settings.html）共用这一套。
+
+   原则：颜色、圆角、字体一律走宿主变量的别名，不写死具体色值。
+   宿主的主题样式由 SDK 自动注入页面，所以深浅色会自动跟随，不用写 prefers-color-scheme。
+   宿主实际提供的变量：--bg / --bg-card / --accent / --accent-hover / --accent-light /
+   --text / --text-light / --text-muted / --border / --shadow / --green / --danger /
+   --overlay-subtle / --overlay-light / --overlay-medium / --radius-input / --radius-card /
+   --font-ui / --font-mono */
+
+:root {
+  /* 语义别名。两个页面只用这一层，不直接写宿主变量名。 */
+  --tts-text: var(--text, #33363b);
+  --tts-text-2: var(--text-muted, #83888f);
+  --tts-line: var(--border, #c9ccd1);
+  --tts-surface: var(--bg-card, #fcfcfb);
+  --tts-ok: var(--green, #4f8a6a);
+  --tts-err: var(--danger, #9b4a44);
+  --tts-accent: var(--accent, #5b6b8c);
+  --tts-radius: var(--radius-card, 8px);
+  --tts-radius-input: var(--radius-input, 6px);
+  /* 分隔线比普通边框淡一点，深浅色都合适 */
+  --tts-divider: color-mix(in srgb, var(--border, #c9ccd1) 55%, transparent);
+}
+
+html, body {
+  margin: 0;
+  background: transparent;
+  color: var(--tts-text);
+  font-family: var(--font-ui, system-ui, "PingFang SC", "Microsoft YaHei", sans-serif);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* .row / .group 都设了 display: grid，会盖掉 hidden 属性的默认 display:none，
+   所以这里补一条，隐藏才真正生效。 */
+[hidden] { display: none !important; }
+
+h1, h2, p { margin: 0; }
+
+/* ---- 一行一项：两个页面共用 ---- */
+
+.row {
+  display: grid;
+  gap: 10px;
+  align-items: baseline;
+  padding: 9px 0;
+}
+
+/* 面板：标签 + 值。设置页在 settings.css 里改成三列（多一个操作区）。 */
+.row {
+  grid-template-columns: minmax(64px, 84px) 1fr;
+}
+
+.row + .row {
+  border-top: 1px solid var(--tts-divider);
+}
+
+.label {
+  font-size: 12px;
+  color: var(--tts-text-2);
+}
+
+.value {
+  font-size: 13px;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.value[data-state="loading"] {
+  color: var(--tts-text-2);
+}
+
+/* 状态点：绿=正常，红=有问题，灰=不适用 */
+.value[data-state="ok"]::before,
+.value[data-state="bad"]::before,
+.value[data-state="muted"]::before {
+  content: "●";
+  margin-right: 6px;
+  font-size: 9px;
+  vertical-align: 1px;
+}
+
+.value[data-state="ok"]::before { color: var(--tts-ok); }
+.value[data-state="bad"]::before { color: var(--tts-err); }
+.value[data-state="muted"]::before { color: var(--tts-text-2); }
+
+/* ---- 提示与结果 ---- */
+
+.hint {
+  margin: 0;
+  padding: 0 2px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--tts-text-2);
+}
+
+.message {
+  margin: 0;
+  padding: 0 2px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.message[data-state="ok"] { color: var(--tts-ok); }
+.message[data-state="bad"] { color: var(--tts-err); }
+.message[data-state="busy"] { color: var(--tts-text-2); }
+
+/* ---- 按钮 ---- */
+
+button {
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 14px;
+  border: 1px solid var(--tts-line);
+  border-radius: var(--tts-radius-input);
+  background: transparent;
+  color: var(--tts-text);
+  cursor: pointer;
+  transition: opacity 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--tts-accent);
+  color: var(--tts-accent);
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+button:focus-visible {
+  outline: 2px solid var(--tts-accent);
+  outline-offset: 2px;
+}
+
+button.primary {
+  border-color: transparent;
+  background: var(--tts-accent);
+  /* 主色底上的文字用宿主底色，深色主题下自动变深，不会刺眼 */
+  color: var(--bg, #f6f6f4);
+}
+
+button.primary:hover:not(:disabled) {
+  border-color: transparent;
+  color: var(--bg, #f6f6f4);
+  opacity: 0.9;
+}
+
+/* ---- 表单控件 ---- */
+
+select, input[type="text"] {
+  font: inherit;
+  font-size: 12px;
+  color: var(--tts-text);
+  background: var(--tts-surface);
+  border: 1px solid var(--tts-line);
+  border-radius: var(--tts-radius-input);
+  padding: 5px 8px;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+}
+
+select:focus, input[type="text"]:focus {
+  outline: none;
+  border-color: var(--tts-accent);
+}
+
+input[type="text"].mono {
+  font-family: var(--font-mono, Consolas, monospace);
+}
