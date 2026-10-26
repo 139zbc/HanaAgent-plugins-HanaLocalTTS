@@ -35,6 +35,19 @@
       <div class="row">
         <span class="label">运行模式</span>
         <span class="value" id="kokoro-device" data-state="loading">正在查看…</span>
+        <span class="actions">
+          <select id="device-select" hidden>
+            <option value="cpu">CPU</option>
+            <option value="cuda">GPU（显卡）</option>
+          </select>
+        </span>
+      </div>
+
+      <div class="row column" id="device-confirm-row" hidden>
+        <span class="value" id="device-confirm-text">切到 GPU 要下 3.5GB，服务会停几分钟。</span>
+        <div class="actions">
+          <button id="device-confirm" type="button" class="small">确认切换</button>
+        </div>
       </div>
 
       <div class="row" id="autostop-row" hidden>

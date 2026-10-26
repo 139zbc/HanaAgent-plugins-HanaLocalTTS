@@ -34,6 +34,9 @@ const startBtn = document.getElementById("kokoro-start");
 const stopBtn = document.getElementById("kokoro-stop");
 const autostopRow = document.getElementById("autostop-row");
 const autostopToggle = document.getElementById("autostop-toggle");
+const deviceSelect = document.getElementById("device-select");
+const deviceConfirmRow = document.getElementById("device-confirm-row");
+const deviceConfirmBtn = document.getElementById("device-confirm");
 const installBtn = document.getElementById("install-btn");
 const savePath = document.getElementById("save-path");
 const progressWrap = document.getElementById("progress-wrap");
@@ -116,6 +119,40 @@ async function callService(path) {
   const body = await response.json().catch(() => ({}));
   if (!response.ok || !body.ok) throw new Error(body.error || "操作没有成功。");
   return body;
+}
+
+deviceSelect.addEventListener("change", () => {
+  if (deviceSelect.value === "cuda") {
+    deviceConfirmRow.hidden = false;
+  } else {
+    deviceConfirmRow.hidden = true;
+    startSwitch("cpu");
+  }
+});
+
+deviceConfirmBtn.addEventListener("click", () => {
+  deviceConfirmRow.hidden = true;
+  startSwitch("cuda");
+});
+
+async function startSwitch(target) {
+  deviceSelect.disabled = true;
+  setRow("kokoro-device", "loading", "正在切换…");
+  try {
+    const response = await hana.api.fetch("kokoro-device", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ device: target }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok || !body.ok) throw new Error(body.error || "切换失败。");
+    await loadKokoroStatus();
+  } catch (error) {
+    showError(error instanceof Error ? error.message : "切换失败。");
+    await loadKokoroStatus();
+  } finally {
+    deviceSelect.disabled = false;
+  }
 }
 
 autostopToggle.addEventListener("change", async () => {
@@ -223,6 +260,9 @@ async function loadKokoroStatus() {
     // 自动停止开关：已安装才显示
     autostopRow.hidden = !body.installed;
     autostopToggle.checked = body.autoStop !== false;
+    // 运行模式切换：已安装才显示
+    deviceSelect.hidden = !body.installed;
+    deviceSelect.value = body.targetDevice === "cuda" ? "cuda" : "cpu";
 
     if (!body.installed) {
       installSection.hidden = false;

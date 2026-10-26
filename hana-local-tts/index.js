@@ -208,7 +208,7 @@ $d
 
 async function kokoroStatus(sdk) {
   const root = await kokoroRoot(sdk);
-  const result = { installed: false, dirGB: null, running: false, foreign: false, device: "", path: root, defaultPath: await defaultKokoroRoot(sdk), autoStop: await autoStopEnabled(sdk) };
+  const result = { installed: false, dirGB: null, running: false, foreign: false, device: "", path: root, defaultPath: await defaultKokoroRoot(sdk), autoStop: await autoStopEnabled(sdk), targetDevice: await kokoroDevice(sdk), gpuAvailable: null };
   const executable = await powershellPath(sdk);
   if (!executable) return result;
   try {
@@ -261,7 +261,7 @@ function kokoroVoiceId(value) {
   return typeof value === "string" && KOKORO_VOICE_IDS.has(value) ? value : KOKORO_DEFAULT_VOICE;
 }
 
-function kokoroScript(root, textFile, wavFile, voice, rate, play = true) {
+function kokoroScript(root, textFile, wavFile, voice, rate, play = true, device = "cpu") {
   const python = path.join(root, ".venv", "Scripts", "python.exe");
   const server = path.join(root, "server.py");
   const player = play
@@ -282,6 +282,7 @@ function Test-Kokoro {
 }
 if (-not (Test-Kokoro)) {
   if (-not (Test-Path -LiteralPath '${quotePs(python)}')) { throw '找不到本地 Kokoro。' }
+  $env:KOKORO_DEVICE = '${quotePs(device)}'
   Start-Process -FilePath '${quotePs(python)}' -ArgumentList '${quotePs(server)}' -WorkingDirectory '${quotePs(root)}' -WindowStyle Hidden
   $deadline = (Get-Date).AddSeconds(80)
   do {
@@ -307,7 +308,7 @@ async function writeSpeechFile(sdk, text, voice, rate, wavFile, engine, play = t
     try {
       const kokoroVoice = kokoroVoiceId(voice);
       const root = await kokoroRoot(sdk);
-      await runPowerShell(executable, kokoroScript(root, textFile, wavFile, kokoroVoice, rate, play), KOKORO_TIMEOUT_MS);
+      await runPowerShell(executable, kokoroScript(root, textFile, wavFile, kokoroVoice, rate, play, await kokoroDevice(sdk)), KOKORO_TIMEOUT_MS);
       await ensureWatcher(sdk);
     } finally {
       await rm(textFile, { force: true });
@@ -579,8 +580,8 @@ foreach ($p in $all) {
 `.trim();
 }
 
-// 启动脚本：拉起 server.py，等健康检查通过。输出 ok。
-function kokoroStartScript(root) {
+// 启动脚本：拉起 server.py，等健康检查通过。输出 ok。device 是目标模式（cpu/cuda）。
+function kokoroStartScript(root, device) {
   const python = path.join(root, ".venv", "Scripts", "python.exe");
   const server = path.join(root, "server.py");
   return `
@@ -594,8 +595,9 @@ function Test-Kokoro {
 }
 if (Test-Kokoro) { 'ok'; exit }
 if (-not (Test-Path -LiteralPath '${quotePs(python)}')) { throw '找不到本地 Kokoro，请先安装。' }
+$env:KOKORO_DEVICE = '${quotePs(device)}'
 Start-Process -FilePath '${quotePs(python)}' -ArgumentList '${quotePs(server)}' -WorkingDirectory '${quotePs(root)}' -WindowStyle Hidden
-$deadline = (Get-Date).AddSeconds(80)
+$deadline = (Get-Date).AddSeconds(120)
 do {
   Start-Sleep -Milliseconds 500
   if (Test-Kokoro) { break }
@@ -800,6 +802,85 @@ async function autoStopEnabled(sdk) {
   }
 }
 
+// 目标运行模式：cpu 或 cuda。没配置时用 cpu。
+async function kokoroDevice(sdk) {
+  try {
+    const all = await sdk.config.getAll();
+    return all?.kokoroDevice === "cuda" ? "cuda" : "cpu";
+  } catch {
+    return "cpu";
+  }
+}
+
+// 检查 GPU 是否可用（有 NVIDIA 显卡且驱动支持）。
+// nvidia-smi 不一定在沙箱进程的 PATH 里，先试绝对路径，再用 WMI 查硬件兑底。
+async function checkGpuAvailable(sdk) {
+  const executable = await powershellPath(sdk);
+  if (!executable) return { ok: false, error: "找不到 Windows PowerShell。" };
+  const script = `
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$smi = Join-Path $env:SystemRoot 'System32\\nvidia-smi.exe'
+$found = $false
+if (Test-Path -LiteralPath $smi) {
+  $out = & $smi --query-gpu=name --format=csv,noheader 2>$null
+  if ($out) { $found = $true }
+}
+if (-not $found) {
+  $gpus = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*NVIDIA*' })
+  if ($gpus.Count -gt 0) { $found = $true }
+}
+if ($found) { 'gpu-ok' } else { 'no-gpu' }
+`.trim();
+  try {
+    const { stdout } = await runPowerShell(executable, script, 20000);
+    return String(stdout || "").includes("gpu-ok") ? { ok: true } : { ok: false, error: "没有检测到 NVIDIA 显卡。" };
+  } catch (error) {
+    return { ok: false, error: failureText(error) };
+  }
+}
+
+// 重装 torch：target 为 'cuda' 装 cu130 版（约 3.5GB），'cpu' 装默认版（约 200MB）。
+// 写进度到 install-state.json，复用安装页的轮询展示。
+async function reinstallTorch(sdk, root, target) {
+  const python = path.join(root, ".venv", "Scripts", "python.exe");
+  const pipArgs = target === "cuda"
+    ? ["torch==2.14.1", "--index-url", "https://download.pytorch.org/whl/cu130"]
+    : ["torch==2.14.1"];
+  const message = target === "cuda" ? "正在安装 GPU 版 PyTorch，约 3.5GB，需要几分钟…" : "正在装回 CPU 版 PyTorch，约 200MB…";
+  // 先卸载：CPU 版和 GPU 版版本号相同（2.14.1），不卸的话 pip 会认为“已装”直接跳过。
+  // pip 用 Start-Process -Wait 跑：用 & 直接调用会成为沙箱 PowerShell 的孙进程被 job 掐掉；M8 就是这么成功的。
+  const pipList = ["-m", "pip", "install", "--disable-pip-version-check", "--no-warn-script-location", ...pipArgs];
+  const pipListPs = pipList.map((a) => `'${quotePs(a)}'`).join(", ");
+  const script = `
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$root = '${quotePs(root)}'
+$state = Join-Path $root 'install-state.json'
+$log = Join-Path $root 'torch-switch.log'
+$py = '${quotePs(python)}'
+'begin' | Out-File -LiteralPath $log -Encoding utf8
+$progress = @{ phase = 'switch-torch'; message = '${quotePs(message)}'; percent = 5 }
+$progress | ConvertTo-Json -Compress | Out-File -LiteralPath $state -Encoding utf8
+'uninstalling' | Out-File -LiteralPath $log -Append -Encoding utf8
+$un = Start-Process -FilePath $py -ArgumentList @('-m','pip','uninstall','-y','torch') -WindowStyle Hidden -PassThru -Wait
+"uninstall exit=$($un.ExitCode)" | Out-File -LiteralPath $log -Append -Encoding utf8
+'installing' | Out-File -LiteralPath $log -Append -Encoding utf8
+$ins = Start-Process -FilePath $py -ArgumentList @(${pipListPs}) -WindowStyle Hidden -PassThru -Wait
+"install exit=$($ins.ExitCode)" | Out-File -LiteralPath $log -Append -Encoding utf8
+if ($ins.ExitCode -ne 0) { throw 'PyTorch 安装失败。' }
+$done = @{ phase = 'switch-torch-done'; message = '安装完成'; percent = 100 }
+$done | ConvertTo-Json -Compress | Out-File -LiteralPath $state -Encoding utf8
+'done' | Out-File -LiteralPath $log -Append -Encoding utf8
+'ok'
+`.trim();
+  const executable = await powershellPath(sdk);
+  if (!executable) throw new Error("找不到 Windows PowerShell。");
+  const { stdout } = await runPowerShell(executable, script, 30 * 60 * 1000);
+  if (!String(stdout || "").includes("ok")) throw new Error("安装没有成功。");
+  return { ok: true };
+}
+
 async function cleanupOrphanKokoro(sdk) {
   const marker = await readSessionMarker(sdk);
   if (!marker.hanaPid) return false;
@@ -830,7 +911,8 @@ async function startKokoroService(sdk) {
   const root = await kokoroRoot(sdk);
   const executable = await powershellPath(sdk);
   if (!executable) throw new Error("找不到 Windows PowerShell。");
-  const { stdout } = await runPowerShell(executable, kokoroStartScript(root), 90000);
+  const device = await kokoroDevice(sdk);
+  const { stdout } = await runPowerShell(executable, kokoroStartScript(root, device), 120000);
   if (!String(stdout || "").includes("ok")) throw new Error("启动没有成功。");
   await ensureWatcher(sdk);
   return { ok: true };
@@ -1026,6 +1108,61 @@ export default defineApp(async (sdk) => {
         if (status.foreign) return c.json({ ok: false, error: "服务是从另一个目录启动的，不能在这里停。" }, 400);
         const result = await stopKokoroService(sdk);
         return c.json(result);
+      } catch (error) {
+        return c.json({ ok: false, error: failureText(error) }, 500);
+      }
+    });
+
+    app.post("/kokoro-device", async (c) => {
+      let body;
+      try {
+        body = await c.req.json();
+      } catch {
+        return c.json({ error: "请求不是 JSON。" }, 400);
+      }
+      const target = body && body.device === "cuda" ? "cuda" : "cpu";
+      try {
+        const status = await kokoroStatus(sdk);
+        if (!status.installed) return c.json({ ok: false, error: "还没有安装 Kokoro。" }, 400);
+        const current = await kokoroDevice(sdk);
+        if (current === target) return c.json({ ok: true, device: target, unchanged: true });
+        if (target === "cuda") {
+          const gpu = await checkGpuAvailable(sdk);
+          if (!gpu.ok) return c.json({ ok: false, error: gpu.error }, 400);
+        }
+        // 切换前停服务（不包含 watcher：watcher 盯的是 Hana，不是服务）
+        await stopKokoroService(sdk);
+        const root = await kokoroRoot(sdk);
+        try {
+          await reinstallTorch(sdk, root, target);
+        } catch (error) {
+          // 装不上就回滚到 CPU 版 torch，保证环境可用
+          await sdk.logger.error(`torch switch to ${target} failed: ${failureText(error)}`);
+          if (target === "cuda") {
+            try { await reinstallTorch(sdk, root, "cpu"); } catch (rollbackError) {
+              await sdk.logger.error(`rollback to cpu failed: ${failureText(rollbackError)}`);
+            }
+          }
+          return c.json({ ok: false, error: `切换失败：${failureText(error)}` }, 500);
+        }
+        await sdk.config.setMany({ kokoroDevice: target });
+        // 重启服务并用 /health 验证实际模式
+        const startResult = await startKokoroService(sdk);
+        if (!startResult.ok) return c.json({ ok: false, error: "服务重启失败，请手动点启动。" }, 500);
+        const after = await kokoroStatus(sdk);
+        const actual = after.device || "cpu";
+        if (target === "cuda" && actual !== "cuda") {
+          await sdk.logger.error(`cuda requested but service reports ${actual}; rolling back`);
+          await stopKokoroService(sdk);
+          try { await reinstallTorch(sdk, root, "cpu"); } catch (rollbackError) {
+            await sdk.logger.error(`rollback to cpu failed: ${failureText(rollbackError)}`);
+          }
+          await sdk.config.setMany({ kokoroDevice: "cpu" });
+          await startKokoroService(sdk).catch(() => {});
+          return c.json({ ok: false, error: "GPU 版启动后没有生效，已回退到 CPU。" }, 500);
+        }
+        await sdk.logger.info(`kokoro device switched to ${target} (service reports ${actual})`);
+        return c.json({ ok: true, device: actual });
       } catch (error) {
         return c.json({ ok: false, error: failureText(error) }, 500);
       }

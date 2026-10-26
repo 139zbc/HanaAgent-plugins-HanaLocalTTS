@@ -61,6 +61,11 @@
             "type": "boolean",
             "title": "Hana 退出时自动停止 Kokoro",
             "default": true
+          },
+          "kokoroDevice": {
+            "type": "string",
+            "title": "Kokoro 运行模式",
+            "default": "cpu"
           }
         }
       },
