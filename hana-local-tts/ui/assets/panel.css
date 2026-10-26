@@ -25,6 +25,7 @@
   padding: 2px 12px;
   border: 1px solid var(--tts-line);
   border-radius: var(--tts-radius);
+  corner-shape: squircle;
   background: var(--tts-surface);
 }
 

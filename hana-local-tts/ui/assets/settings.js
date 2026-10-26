@@ -1,4 +1,5 @@
 import { hana } from "./sdk.js";
+import { followHostTheme } from "./theme.js";
 
 const probeStatus = document.getElementById("probe-status");
 const probe = document.getElementById("probe");
@@ -244,7 +245,7 @@ async function loadKokoroStatus() {
     if (body.running) {
       setRow("kokoro-running", "ok", body.foreign ? "服务运行中（另一个目录）" : "服务运行中");
       if (body.device) {
-        setRow("kokoro-device", "ok", body.device === "cuda" ? "GPU（显卡）" : "CPU");
+        setRow("kokoro-device", "ok", body.device === "cuda" ? "GPU" : "CPU");
       } else {
         setRow("kokoro-device", "loading", "服务没有上报运行模式");
       }
@@ -292,6 +293,8 @@ async function loadKokoroStatus() {
 }
 
 await hana.ready();
+// 先把宿主主题设好，免得页面先闪一下兜底色。
+followHostTheme();
 
 loadKokoroStatus();
 

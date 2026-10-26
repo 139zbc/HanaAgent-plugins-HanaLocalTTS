@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>本地语音朗读</title>
-  <link rel="stylesheet" href="./assets/app.css">
-  <link rel="stylesheet" href="./assets/settings.css">
+  <link rel="stylesheet" href="./assets/app.css?v=3">
+  <link rel="stylesheet" href="./assets/settings.css?v=3">
 </head>
 <body>
   <main>
@@ -13,93 +13,132 @@
 
     <section class="group">
       <h2>本地 Kokoro</h2>
-
-      <div class="row">
-        <span class="label">安装状态</span>
-        <span class="value" id="kokoro-installed" data-state="loading">正在查看…</span>
-      </div>
-
-      <div class="row">
-        <span class="label">运行状态</span>
-        <span class="value" id="kokoro-running" data-state="loading">正在查看…</span>
-        <span class="actions">
-          <button id="kokoro-start" type="button" class="small" hidden>启动</button>
-          <button id="kokoro-stop" type="button" class="small" hidden>停止</button>
-        </span>
-      </div>
-
-      <div class="row">
-        <span class="label">安装路径</span>
-        <span class="value mono" id="kokoro-path">—</span>
-      </div>
-
-      <div class="row">
-        <span class="label">运行模式</span>
-        <span class="value" id="kokoro-device" data-state="loading">正在查看…</span>
-        <span class="actions">
-          <select id="device-select" hidden>
-            <option value="cpu">CPU</option>
-            <option value="cuda">GPU（显卡）</option>
-          </select>
-        </span>
-      </div>
-
-      <div class="row column" id="device-confirm-row" hidden>
-        <span class="value" id="device-confirm-text">切到 GPU 要下 3.5GB，服务会停几分钟。</span>
-        <div class="actions">
-          <button id="device-confirm" type="button" class="small">确认切换</button>
+      <div class="card">
+        <div class="row">
+          <div class="text">
+            <span class="row-title">安装状态</span>
+            <span class="row-desc" id="kokoro-installed" data-state="loading">正在查看…</span>
+          </div>
         </div>
-      </div>
 
-      <div class="row" id="autostop-row" hidden>
-        <span class="label">自动停止</span>
-        <span class="value">Hana 退出时自动停止服务</span>
-        <label class="switch">
-          <input id="autostop-toggle" type="checkbox" checked>
-          <span class="slider"></span>
-        </label>
+        <div class="row">
+          <div class="text">
+            <span class="row-title">运行状态</span>
+            <span class="row-desc" id="kokoro-running" data-state="loading">正在查看…</span>
+          </div>
+          <span class="actions">
+            <button id="kokoro-start" type="button" class="small" hidden>启动</button>
+            <button id="kokoro-stop" type="button" class="small" hidden>停止</button>
+          </span>
+        </div>
+
+        <div class="row">
+          <div class="text">
+            <span class="row-title">安装路径</span>
+            <span class="row-desc mono" id="kokoro-path">—</span>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="text">
+            <span class="row-title">运行模式</span>
+            <span class="row-desc" id="kokoro-device" data-state="loading">正在查看…</span>
+          </div>
+          <span class="actions">
+            <select id="device-select" hidden>
+              <option value="cpu">CPU</option>
+              <option value="cuda">GPU</option>
+            </select>
+          </span>
+        </div>
+
+        <div class="row" id="device-confirm-row" hidden>
+          <div class="text">
+            <span class="row-title">切到 GPU</span>
+            <span class="row-desc" id="device-confirm-text">要下 3.5GB，服务会停几分钟。</span>
+          </div>
+          <span class="actions">
+            <button id="device-confirm" type="button" class="small">确认切换</button>
+          </span>
+        </div>
+
+        <div class="row" id="autostop-row" hidden>
+          <div class="text">
+            <span class="row-title">自动停止</span>
+            <span class="row-desc">Hana 退出时自动停止服务</span>
+          </div>
+          <label class="switch">
+            <input id="autostop-toggle" type="checkbox" checked>
+            <span class="slider"></span>
+          </label>
+        </div>
       </div>
     </section>
 
     <section class="group">
       <h2>安装位置</h2>
-      <div class="row column">
-        <div class="path-row">
-          <input id="install-root" type="text" spellcheck="false">
-          <button id="save-path" type="button" class="small">保存</button>
+      <div class="card">
+        <div class="row">
+          <div class="text">
+            <span class="row-title">模型目录</span>
+            <span class="row-desc">模型装在这里。改路径后点保存。</span>
+          </div>
         </div>
-        <p class="hint" id="path-hint">模型装在这里。改路径后点保存。</p>
+        <div class="row">
+          <div class="path-row">
+            <input id="install-root" type="text" spellcheck="false">
+            <button id="save-path" type="button" class="primary">保存</button>
+          </div>
+        </div>
       </div>
     </section>
 
     <section class="group" id="install-section" hidden>
       <h2>安装 Kokoro</h2>
-      <p class="hint">还没有安装。选一个下载来源，点「安装」。大约要下载 1–1.5GB，需要几分钟到几十分钟。</p>
+      <div class="card">
+        <p class="hint">还没有安装。选一个下载来源，点「安装」。大约要下载 1–1.5GB，需要几分钟到几十分钟。</p>
 
-      <div class="row">
-        <span class="label">下载来源</span>
-        <select id="install-source">
-          <option value="modelscope" selected>ModelScope（国内，推荐）</option>
-          <option value="hf-mirror">HF 镜像（国内备选）</option>
-          <option value="huggingface">HuggingFace（海外直连）</option>
-        </select>
-      </div>
+        <div class="row">
+          <div class="text">
+            <span class="row-title">下载来源</span>
+          </div>
+          <span class="actions">
+            <select id="install-source">
+              <option value="modelscope" selected>ModelScope（国内，推荐）</option>
+              <option value="hf-mirror">HF 镜像（国内备选）</option>
+              <option value="huggingface">HuggingFace（海外直连）</option>
+            </select>
+          </span>
+        </div>
 
-      <button id="install-btn" type="button">安装</button>
-      <div class="progress-wrap" id="progress-wrap" hidden>
-        <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
-        <p class="hint" id="progress-message"></p>
+        <div class="row">
+          <span class="actions only">
+            <button id="install-btn" type="button" class="primary">安装</button>
+          </span>
+        </div>
+        <div class="progress-wrap" id="progress-wrap" hidden>
+          <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+          <p class="hint" id="progress-message"></p>
+        </div>
+        <p class="hint" id="install-error" role="alert" hidden></p>
       </div>
-      <p class="hint" id="install-error" role="alert" hidden></p>
     </section>
 
     <section class="group">
       <h2>供应商试验</h2>
-      <div class="row">
-        <span class="label">注册状态</span>
-        <span class="value" id="probe-status" role="status">正在查看能不能注册成语音供应商…</span>
+      <div class="card">
+        <div class="row">
+          <div class="text">
+            <span class="row-title">注册状态</span>
+            <span class="row-desc" id="probe-status" role="status">正在查看能不能注册成语音供应商…</span>
+          </div>
+        </div>
+        <div class="row">
+          <span class="actions only">
+            <button id="probe" type="button" class="primary">试一下合成</button>
+          </span>
+        </div>
       </div>
-      <button id="probe" type="button">试一下合成</button>
     </section>
   </main>
   <script type="module" src="./assets/settings.js"></script>

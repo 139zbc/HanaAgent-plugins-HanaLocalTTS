@@ -1,4 +1,5 @@
 import { hana } from './sdk.js';
+import { followHostTheme } from './theme.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -122,7 +123,7 @@ function renderKokoro(state) {
   }
   if (state.running) {
     setValue(ui.kokoro, state.foreign ? '服务运行中（另一个目录）' : '服务运行中', state.foreign ? 'muted' : 'ok');
-    setValue(ui.device, state.device === 'cuda' ? 'GPU（显卡）' : 'CPU', 'ok');
+    setValue(ui.device, state.device === 'cuda' ? 'GPU' : 'CPU', 'ok');
     return;
   }
   setValue(ui.kokoro, '服务没有运行', 'muted');
@@ -254,4 +255,6 @@ window.addEventListener('focus', () => {
 });
 
 await hana.ready();
+// 先把宿主主题设好，再读状态，免得页面先闪一下兜底色。
+followHostTheme();
 load();

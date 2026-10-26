@@ -1,82 +1,151 @@
-/* 设置页样式。基础部分在 app.css（和卡片面板共用），这里只写设置页特有的。 */
+/* 设置页样式。基础部分在 app.css（和卡片面板共用），这里只写设置页特有的。
+   结构对齐 Hana 自己的设置页：分组标题在卡片外，卡内是「标题在上、说明在下」的两行条目。 */
 
 main {
   display: grid;
-  gap: 20px;
-  max-width: 460px;
+  gap: 28px;
+  /* 不锁宽度：宿主自己的设置页签内容是铺满内容区的（详情页才限宽 620px）。
+     这里跟着宿主弹窗给多少就显示多少。 */
   padding: 4px 0;
 }
 
-h1 { font-size: 17px; font-weight: 600; }
-h2 { font-size: 14px; font-weight: 600; }
+h2 {
+  /* 宿主分组标题用 --fs-title（1rem = 16px）/ 600 */
+  font-size: var(--fs-title, 16px);
+  font-weight: 600;
+  color: var(--text, var(--tts-text));
+  margin-bottom: 12px;
+}
 
-.hint { font-size: 12px; }
+.hint {
+  font-size: var(--fs-caption, 12.5px);
+  line-height: 1.6;
+}
 
+/* 分组：标题在卡片外 */
 .group {
   display: grid;
-  gap: 2px;
+  gap: 0;
 }
 
-.group > h2 {
-  margin-bottom: 4px;
-}
-
-/* 一行一项：与面板共用 .row，标签列宽度统一。
-   设置页多一个操作区（启停按钮、下拉框），所以是三列。
-   分隔线由 app.css 的 .row + .row 统一画，这里不要再加 border-bottom，
-   否则相邻两行会各画一条线，变成双线。 */
-.row {
-  grid-template-columns: minmax(64px, 84px) 1fr auto;
-}
-
-/* 没有操作区的行（比如安装路径、注册状态）不用留空列。
-   :not(.column) 是必须的：否则这条的优先级会盖掉下面的 .row.column 竖排行。 */
-.row:not(.column):not(:has(.actions)):not(:has(.switch)) {
-  grid-template-columns: minmax(64px, 84px) 1fr;
-}
-
-/* 竖排一行的（说明文字 + 操作），不分标签列 */
-.row.column {
-  grid-template-columns: 1fr;
-  gap: 6px;
-}
-
-.row .value { font-size: 13px; }
-.row .value.mono { font-size: 12px; word-break: break-all; }
-
-.value[data-state="ok"]::before { color: var(--tts-ok); }
-.value[data-state="bad"]::before { color: var(--tts-err); }
-.value[data-state="loading"] { color: var(--tts-text-2); }
-
-/* 操作区靠右 */
-.actions {
-  margin-left: auto;
-  display: inline-flex;
-  gap: 6px;
-  align-items: center;
-}
-
-/* 主按钮（试一下合成、安装）不占满整行 */
-button { justify-self: start; }
-button.small { padding: 4px 12px; font-size: 12px; }
-
-.path-row {
+/* 卡片：宿主设置页的表面样式。
+   圆角值和宿主一致（calc(var(--radius-card) + 2px)），并且用 corner-shape: squircle
+   —— 宿主就是这么画的。同样的 border-radius，squircle 视觉上比正圆更饱满，
+   用普通圆角会看着比宿主小一圈。 */
+.card {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 2px 0;
+  border: var(--tts-border-width) solid var(--tts-card-border);
+  border-radius: var(--tts-card-radius);
+  corner-shape: squircle;
+  background: var(--tts-surface);
+  overflow: hidden;
+}
+
+.card > .hint {
+  padding: 12px 16px 0;
+}
+
+/* 卡内条目：左文右控，垂直居中 */
+.row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 16px;
+  position: relative;
+}
+
+/* 卡内分隔线：两端缩进，跟宿主一致。
+   宿主用的是 height + background（不是 border-top），粗细取 --border-width。 */
+.row + .row::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: var(--tts-divider-inset);
+  right: var(--tts-divider-inset);
+  height: var(--tts-border-width);
+  background: var(--tts-card-divider);
+}
+
+/* 只有控件的条目（安装、试一下合成）不需要左边距缩进 */
+.row:has(> .actions.only)::before {
+  left: 0;
+  right: 0;
+}
+
+.text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.row-title {
+  /* 宿主行标题：--fs-body（0.9rem）/ 字重 400 */
+  font-size: var(--fs-body, 14.4px);
+  font-weight: var(--settings-label-weight, 400);
+  color: var(--tts-text);
+  line-height: 1.4;
+}
+
+.row-desc {
+  /* 宿主行说明：--fs-caption（0.78rem） */
+  font-size: var(--fs-caption, 12.5px);
+  color: var(--tts-text-2);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.row-desc.mono {
+  font-family: var(--font-mono, Consolas, monospace);
+  font-size: 11px;
+}
+
+/* 状态点：绿=正常，红=有问题，灰=不适用 */
+.row-desc[data-state="ok"]::before {
+  content: "●";
+  color: var(--tts-ok);
+  margin-right: 6px;
+  font-size: 9px;
+  vertical-align: 1px;
+}
+
+.row-desc[data-state="bad"]::before {
+  content: "●";
+  color: var(--tts-err);
+  margin-right: 6px;
+  font-size: 9px;
+  vertical-align: 1px;
+}
+
+.row-desc[data-state="loading"] {
+  color: var(--tts-text-2);
+}
+
+/* 右侧控件区 */
+.actions {
+  display: inline-flex;
   gap: 8px;
   align-items: center;
+  flex: 0 0 auto;
+  margin-left: auto;
 }
 
-/* 自动停止开关：底色跟宿主走 */
-#autostop-row .value { font-size: 12px; color: var(--tts-text-2); }
+.actions.only {
+  margin-left: 0;
+}
+
+/* 自动停止开关：跟宿主 .hana-toggle 一致，轨道开=accent、关=overlay-medium */
+#autostop-row .row-desc { font-size: 12px; }
 
 .switch {
   position: relative;
   display: inline-block;
   width: 36px;
   height: 20px;
-  margin-left: auto;
-  flex: 0 0 auto;
+  flex: 0 0 36px;
+  cursor: pointer;
 }
 
 .switch input { opacity: 0; width: 0; height: 0; }
@@ -84,39 +153,46 @@ button.small { padding: 4px 12px; font-size: 12px; }
 .slider {
   position: absolute;
   inset: 0;
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--tts-line) 70%, transparent);
-  transition: background 0.2s;
-  cursor: pointer;
+  border-radius: var(--tts-toggle-radius);
+  background: var(--overlay-medium, rgba(0, 0, 0, 0.08));
+  transition: background 0.25s ease;
 }
 
 .slider::before {
   content: "";
   position: absolute;
+  top: 3px;
+  left: 3px;
   width: 14px;
   height: 14px;
-  left: 3px;
-  top: 3px;
-  border-radius: 50%;
-  background: var(--bg, #f6f6f4);
-  transition: transform 0.2s;
+  border-radius: var(--tts-toggle-thumb-radius);
+  background: #fff;
+  transition: transform 0.25s ease;
 }
 
-.switch input:checked + .slider { background: var(--tts-ok); }
+.switch input:checked + .slider { background: var(--tts-accent); }
 .switch input:checked + .slider::before { transform: translateX(16px); }
 .switch input:focus-visible + .slider { outline: 2px solid var(--tts-accent); outline-offset: 2px; }
 
+/* 路径输入行 */
+.path-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  width: 100%;
+}
+
 /* 安装进度 */
-.progress-wrap { display: grid; gap: 6px; margin-top: 6px; }
+.progress-wrap { display: grid; gap: 6px; padding: 0 16px 12px; }
 .progress-bar { height: 6px; border-radius: 3px; background: color-mix(in srgb, var(--tts-line) 50%, transparent); overflow: hidden; }
 .progress-fill { height: 100%; width: 0; background: var(--tts-ok); transition: width 0.5s; }
 
-#install-error { color: var(--tts-err); }
+#install-error { padding: 0 16px 12px; color: var(--tts-err); }
 
-/* 窄栏：标签列收窄，操作区换行，避免互相挤压 */
-@media (max-width: 360px) {
-  .row:not(.column) { grid-template-columns: minmax(56px, 72px) 1fr auto; gap: 8px; }
-  .row:not(.column):not(:has(.actions)):not(:has(.switch)) { grid-template-columns: minmax(56px, 72px) 1fr; }
-  .row .actions { margin-left: 0; }
-  .row:has(.actions) .value { text-align: left; }
+/* 窄栏：控件换到下一行，避免挤压文字 */
+@media (max-width: 380px) {
+  .row { flex-wrap: wrap; gap: 10px; }
+  .actions { margin-left: 0; }
+  .row .text { flex-basis: 100%; }
 }

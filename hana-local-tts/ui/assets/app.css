@@ -8,20 +8,55 @@
    --font-ui / --font-mono */
 
 :root {
-  /* 语义别名。两个页面只用这一层，不直接写宿主变量名。 */
-  --tts-text: var(--text, #33363b);
-  --tts-text-2: var(--text-muted, #83888f);
-  --tts-line: var(--border, #c9ccd1);
-  --tts-surface: var(--bg-card, #fcfcfb);
-  --tts-ok: var(--green, #4f8a6a);
-  --tts-err: var(--danger, #9b4a44);
-  --tts-accent: var(--accent, #5b6b8c);
-  --tts-radius: var(--radius-card, 8px);
-  --tts-radius-input: var(--radius-input, 6px);
-  /* 分隔线比普通边框淡一点，深浅色都合适 */
-  --tts-divider: color-mix(in srgb, var(--border, #c9ccd1) 55%, transparent);
+  /* 宿主的 continuous-corners.css：浏览器支持 squircle 时把所有圆角放大 1.84 倍。
+     那是宿主全局的几何规则，不在主题 CSS 里，我们的页面拿不到，
+     不补这一条的话圆角只有宿主的一半（5px vs 9.2px）。 */
+  --corner-radius-scale: 1;
 }
 
+@supports (corner-shape: squircle) {
+  :root {
+    --corner-radius-scale: 1.8408964152537137;
+  }
+}
+
+:root {
+  /* 语义别名。两个页面只用这一层，不直接写宿主变量名。
+     兜底值取自宿主默认主题 new-warm-paper。 */
+  --tts-text: var(--text, #2a2622);
+  --tts-text-2: var(--text-muted, #4a433c);
+  --tts-line: var(--border, #d8cfbe);
+  --tts-surface: var(--bg-card, #fbf7ee);
+  --tts-ok: var(--green, #4a6b4a);
+  --tts-err: var(--danger, #8b2c1f);
+  --tts-accent: var(--accent, #537d96);
+  --tts-radius: var(--radius-card, 3px);
+  --tts-radius-input: var(--radius-input, 2px);
+  /* 分隔线比普通边框淡一点，深浅色都合适 */
+  --tts-divider: color-mix(in srgb, var(--border, #d8cfbe) 55%, transparent);
+  /* 卡片边框：宿主设置页用 border 混 72% 透明 */
+  --tts-card-border: color-mix(in srgb, var(--border, #d8cfbe) 72%, transparent);
+  /* 卡内分隔线：宿主用 border 混 62% 透明，两端缩进 */
+  --tts-card-divider: color-mix(in srgb, var(--border, #d8cfbe) 62%, transparent);
+  --tts-divider-inset: 16px;
+  /* 线条粗细跟宿主走：宿主用 --border-width，当前主题是 0.5px hairline */
+  --tts-border-width: var(--border-width, 1px);
+  --tts-control-height: 32px;
+  /* 卡片圆角：宿主设置页卡片用的是 calc(var(--settings-surface-radius) * scale)，
+     而 --settings-surface-radius 在宿主组件里是 calc(var(--radius-card) + 2px)。
+     那个变量属于宿主 React 组件的 :root，我们的页面拿不到，所以这里自己补上。
+     再乘上 --corner-radius-scale，就和宿主完全一致。 */
+  --settings-surface-radius: calc(var(--radius-card, 3px) + 2px);
+  --tts-card-radius: calc(var(--settings-surface-radius) * var(--corner-radius-scale, 1));
+  /* 控件圆角：宿主是 calc(var(--radius-input) + 4px)，同样要乘 scale */
+  --tts-control-radius: calc((var(--radius-input, 2px) + 4px) * var(--corner-radius-scale, 1));
+  /* 开关：宿主 .hana-toggle 的轨道与滑块圆角 */
+  --tts-toggle-radius: calc(6px * var(--corner-radius-scale, 1));
+  --tts-toggle-thumb-radius: calc(4px * var(--corner-radius-scale, 1));
+}
+
+/* 宿主主题的变量挂在 :root 上，SDK 会把那份样式表注入进来（见 theme.js）。
+   这里的兜底值取自宿主默认主题 new-warm-paper，主题没加载上时看着也不突兀。 */
 html, body {
   margin: 0;
   background: transparent;
@@ -29,6 +64,19 @@ html, body {
   font-family: var(--font-ui, system-ui, "PingFang SC", "Microsoft YaHei", sans-serif);
   font-size: 13px;
   -webkit-font-smoothing: antialiased;
+}
+
+/* 滚动条完全照抄宿主的基础重置（styles.css）：
+   宿主的全局重置只写了 scrollbar-width: thin + scrollbar-color，
+   没有 ::-webkit-scrollbar 规则——所以 Windows 上宿主用的是
+   Chromium 的 thin 原生滚动条（9px），不是自定义的 4px 细条。
+   我们之前多画了一套 webkit 规则，反而和宿主不一样，这里去掉。 */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(128, 128, 128, 0.2) transparent;
 }
 
 /* .row / .group 都设了 display: grid，会盖掉 hidden 属性的默认 display:none，
@@ -51,8 +99,11 @@ h1, h2, p { margin: 0; }
   grid-template-columns: minmax(64px, 84px) 1fr;
 }
 
-.row + .row {
-  border-top: 1px solid var(--tts-divider);
+/* 分隔线只由面板自己画（.panel 作用域内）。
+   设置页在 settings.css 里用伪元素画带缩进的线，
+   如果这里也画，两条规则叠加就会变成双线。 */
+.panel .row + .row {
+  border-top: var(--tts-border-width) solid var(--tts-divider);
 }
 
 .label {
@@ -105,23 +156,28 @@ h1, h2, p { margin: 0; }
 .message[data-state="bad"] { color: var(--tts-err); }
 .message[data-state="busy"] { color: var(--tts-text-2); }
 
-/* ---- 按钮 ---- */
+/* ---- 按钮 ----
+   样式照抄宿主设置页（SettingsModalShell / SettingsForm）：
+   主按钮 = 主题强调色底 + 白字；副按钮 = 灰底（overlay-subtle 压 bg-card）+ 深色字。
+   颜色全部走宿主变量，主题换了自动跟着变。 */
 
 button {
   font: inherit;
-  font-size: 12px;
-  padding: 5px 14px;
-  border: 1px solid var(--tts-line);
-  border-radius: var(--tts-radius-input);
-  background: transparent;
+  font-size: 13px;
+  min-height: var(--tts-control-height);
+  padding: 0 14px;
+  /* 副按钮：灰底、无边框 */
+  border: none;
+  border-radius: var(--tts-control-radius);
+  corner-shape: squircle;
+  background: var(--overlay-subtle, rgba(42, 38, 34, 0.03));
   color: var(--tts-text);
   cursor: pointer;
-  transition: opacity 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  transition: opacity 0.15s ease, border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
 }
 
 button:hover:not(:disabled) {
-  border-color: var(--tts-accent);
-  color: var(--tts-accent);
+  background: var(--overlay-light, rgba(42, 38, 34, 0.04));
 }
 
 button:disabled {
@@ -134,32 +190,35 @@ button:focus-visible {
   outline-offset: 2px;
 }
 
+/* 主按钮：主题强调色底 + 宿主 on-accent（白）字 */
 button.primary {
-  border-color: transparent;
   background: var(--tts-accent);
-  /* 主色底上的文字用宿主底色，深色主题下自动变深，不会刺眼 */
-  color: var(--bg, #f6f6f4);
+  color: var(--on-accent, #fff);
 }
 
 button.primary:hover:not(:disabled) {
-  border-color: transparent;
-  color: var(--bg, #f6f6f4);
-  opacity: 0.9;
+  background: var(--accent-hover, var(--tts-accent));
+  color: var(--on-accent, #fff);
 }
 
 /* ---- 表单控件 ---- */
 
 select, input[type="text"] {
   font: inherit;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--tts-text);
   background: var(--tts-surface);
-  border: 1px solid var(--tts-line);
-  border-radius: var(--tts-radius-input);
-  padding: 5px 8px;
+  border: var(--tts-border-width) solid var(--tts-card-border);
+  border-radius: var(--tts-control-radius);
+  min-height: var(--tts-control-height);
+  padding: 0 10px;
   box-sizing: border-box;
   width: 100%;
   max-width: 100%;
+}
+
+select:hover, input[type="text"]:hover {
+  background: var(--overlay-subtle, rgba(0, 0, 0, 0.03));
 }
 
 select:focus, input[type="text"]:focus {
