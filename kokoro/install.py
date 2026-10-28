@@ -230,7 +230,7 @@ def can_import_download_libs(python: Path) -> bool:
     return result.returncode == 0
 
 
-def python_for_download(root: Path, base_python: str) -> Path:
+def python_for_download(root: Path, base_python: str, pip_source: str) -> Path:
     """模型下载不进 CPU / GPU 运行环境。有现成环境就借用，没有就建一个只装下载库的小环境。"""
     for folder in (".venv-cpu", ".venv-cuda", ".venv"):
         python = root / folder / "Scripts" / "python.exe"
@@ -238,31 +238,66 @@ def python_for_download(root: Path, base_python: str) -> Path:
             return python
     write_state(root, "venv", "正在准备模型下载环境…", 5)
     _, python = create_venv(root, base_python, ".venv-download")
-    run_live(
+    run_pip(
         root,
-        [str(python), "-m", "pip", "install", "--disable-pip-version-check", "--no-warn-script-location", "modelscope", "huggingface_hub"],
-        "deps", "正在准备模型下载工具…", 8, 40,
+        [str(python), "-m", "pip", "install", "--disable-pip-version-check", "--no-warn-script-location",
+         "modelscope", "huggingface_hub", "--index-url", PIP_INDEXES[pip_source]],
+        "deps", "正在准备模型下载工具…", 8, 40, timeout=1800,
     )
     return python
 
 
-def install_cuda_torch(root: Path, python: Path) -> None:
-    write_state(root, "torch", "正在换上 GPU 版 PyTorch（约 3.5GB）…", 30)
-    run([str(python), "-m", "pip", "uninstall", "-y", "torch"])
-    run_live(
-        root,
-        [str(python), "-m", "pip", "install", "--disable-pip-version-check", "--no-warn-script-location",
-         "torch==2.14.1", "--index-url", "https://download.pytorch.org/whl/cu130"],
-        "torch", "正在下载 GPU 版 PyTorch（约 3.5GB）…", 32, 88, timeout=7200,
-    )
+PIP_INDEXES = {
+    "tuna": "https://pypi.tuna.tsinghua.edu.cn/simple",
+    "aliyun": "https://mirrors.aliyun.com/pypi/simple",
+    "pypi": "https://pypi.org/simple",
+}
+TORCH_INDEXES = {
+    "pytorch": "https://download.pytorch.org/whl/cu130",
+    "nju": "https://mirror.nju.edu.cn/pytorch/whl/cu130",
+}
 
 
-def install_dependencies(root: Path, vpython: Path) -> None:
-    run_live(
-        root,
-        [str(vpython), "-m", "pip", "install", "--disable-pip-version-check", "--no-warn-script-location", *DEPENDENCIES],
-        "deps", "正在安装依赖（含 PyTorch，体积较大）…", 8, 78,
-    )
+def env_without_proxy() -> dict[str, str]:
+    """只给这一次子进程用。不改用户机器上的代理设置。"""
+    env = os.environ.copy()
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        env.pop(key, None)
+    env["NO_PROXY"] = "*"
+    env["no_proxy"] = "*"
+    return env
+
+
+def run_pip(root: Path, cmd: list[str], phase: str, message: str, floor: float, ceil: float, timeout: int) -> None:
+    """先按当前环境下载。失败后再用同一个源、不走代理试一次。不会自行换成别的源。"""
+    try:
+        run_live(root, cmd, phase, message, floor, ceil, timeout=timeout)
+        return
+    except RuntimeError as first:
+        write_state(root, phase, "上一次没下成，正在不走代理再试同一个源…", floor)
+        try:
+            run_live(root, cmd, phase, message, floor, ceil, timeout=timeout, env=env_without_proxy())
+        except RuntimeError as second:
+            raise RuntimeError(f"先前：{first}；不走代理再试仍失败：{second}") from second
+
+
+def install_cuda_torch(root: Path, python: Path, torch_source: str, pip_source: str) -> None:
+    write_state(root, "torch", "正在下载 GPU 版 PyTorch（约 2GB）…", 30)
+    cmd = [
+        str(python), "-m", "pip", "install", "--disable-pip-version-check", "--no-warn-script-location",
+        "torch==2.14.1+cu130",
+        "--index-url", TORCH_INDEXES[torch_source],
+        "--extra-index-url", PIP_INDEXES[pip_source],
+    ]
+    run_pip(root, cmd, "torch", "正在下载 GPU 版 PyTorch（约 2GB）…", 32, 88, timeout=7200)
+
+
+def install_dependencies(root: Path, vpython: Path, pip_source: str) -> None:
+    cmd = [
+        str(vpython), "-m", "pip", "install", "--disable-pip-version-check", "--no-warn-script-location",
+        *DEPENDENCIES, "--index-url", PIP_INDEXES[pip_source],
+    ]
+    run_pip(root, cmd, "deps", "正在安装依赖（含 PyTorch，体积较大）…", 8, 78, timeout=7200)
 
 
 def place_snapshot(root: Path, source_dir: Path) -> None:
@@ -332,8 +367,8 @@ def verify(root: Path, vpython: Path, device: str) -> None:
         raise RuntimeError("验证失败: " + ("; ".join(tail[-3:]) if tail else "没有输出"))
 
 
-def install_model(root: Path, base_python: str, source: str) -> None:
-    python = python_for_download(root, base_python)
+def install_model(root: Path, base_python: str, source: str, pip_source: str) -> None:
+    python = python_for_download(root, base_python, pip_source)
     if source == "modelscope":
         download_modelscope(root, python)
     else:
@@ -343,12 +378,12 @@ def install_model(root: Path, base_python: str, source: str) -> None:
     write_state(root, "done", "模型已具备", 100)
 
 
-def install_runtime(root: Path, base_python: str, device: str) -> None:
+def install_runtime(root: Path, base_python: str, device: str, pip_source: str, torch_source: str) -> None:
     folder = ".venv-cuda" if device == "cuda" else ".venv-cpu"
     venv_dir, python = create_venv(root, base_python, folder)
-    install_dependencies(root, python)
+    install_dependencies(root, python, pip_source)
     if device == "cuda":
-        install_cuda_torch(root, python)
+        install_cuda_torch(root, python, torch_source, pip_source)
     if model_file(root).exists():
         verify(root, python, device)
     else:
@@ -362,7 +397,9 @@ def main() -> None:
     global CURRENT_COMPONENT
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", required=True)
-    parser.add_argument("--source", choices=["modelscope", "hf-mirror", "huggingface"], default="modelscope")
+    parser.add_argument("--source", default="modelscope")
+    parser.add_argument("--pip-source", default="tuna")
+    parser.add_argument("--torch-source", default="nju")
     parser.add_argument("--component", choices=["model", "cpu", "gpu"], required=True)
     args = parser.parse_args()
     CURRENT_COMPONENT = args.component
@@ -374,12 +411,28 @@ def main() -> None:
         # server.py 由 App 发起安装时复制进来
         if not (root / "server.py").exists():
             raise RuntimeError("缺少 server.py，请从 App 重新发起安装")
+        pip_source = args.pip_source if args.pip_source in PIP_INDEXES else ""
+        torch_source = args.torch_source if args.torch_source in TORCH_INDEXES else ""
         if args.component == "model":
-            install_model(root, sys.executable, args.source)
+            if args.source not in ("modelscope", "hf-mirror", "huggingface"):
+                raise RuntimeError("不认识的模型下载源")
+            if pip_source not in PIP_INDEXES:
+                pip_source = "tuna"
+            install_model(root, sys.executable, args.source, pip_source)
         elif args.component == "cpu":
-            install_runtime(root, sys.executable, "cpu")
+            if args.source in PIP_INDEXES:
+                pip_source = args.source
+            if pip_source not in PIP_INDEXES:
+                raise RuntimeError("不认识的 CPU 依赖下载源")
+            install_runtime(root, sys.executable, "cpu", pip_source, "pytorch")
         else:
-            install_runtime(root, sys.executable, "cuda")
+            if args.source in TORCH_INDEXES:
+                torch_source = args.source
+            if pip_source not in PIP_INDEXES:
+                raise RuntimeError("不认识的 CPU 依赖下载源")
+            if torch_source not in TORCH_INDEXES:
+                raise RuntimeError("不认识的 GPU 依赖下载源")
+            install_runtime(root, sys.executable, "cuda", pip_source, torch_source)
     except Exception as error:  # noqa: BLE001 - 失败原因要写给 UI
         write_state(root, "failed", f"安装失败：{error}", None, str(error))
         raise

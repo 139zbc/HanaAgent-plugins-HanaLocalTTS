@@ -136,6 +136,8 @@ function dressSelect(select) {
 // ---- 安装区 ----
 
 const installSource = document.getElementById("install-source");
+const pipSource = document.getElementById("pip-source");
+const torchSource = document.getElementById("torch-source");
 const installRoot = document.getElementById("install-root");
 const startBtn = document.getElementById("kokoro-start");
 const stopBtn = document.getElementById("kokoro-stop");
@@ -143,12 +145,20 @@ const autostopRow = document.getElementById("autostop-row");
 const autostopToggle = document.getElementById("autostop-toggle");
 const deviceSelect = document.getElementById("device-select");
 const sourceDress = dressSelect(installSource);
+const pipDress = dressSelect(pipSource);
+const torchDress = dressSelect(torchSource);
 const deviceDress = dressSelect(deviceSelect);
 const downloadModel = document.getElementById("download-model");
 const downloadCpu = document.getElementById("download-cpu");
 const downloadGpu = document.getElementById("download-gpu");
 const savePath = document.getElementById("save-path");
-const installError = document.getElementById("install-error");
+const errorSlots = {
+  model: document.getElementById("error-model"),
+  cpu: document.getElementById("error-cpu"),
+  gpu: document.getElementById("error-gpu"),
+  run: document.getElementById("error-run"),
+  path: document.getElementById("error-path"),
+};
 const progressUi = {
   model: {
     wrap: document.getElementById("progress-model"),
@@ -176,9 +186,12 @@ function stopPolling() {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
 }
 
-function showError(text) {
-  installError.textContent = text;
-  installError.hidden = !text;
+function showError(text, where = "run") {
+  for (const [key, element] of Object.entries(errorSlots)) {
+    const show = key === where && !!text;
+    element.textContent = show ? text : "";
+    element.hidden = !show;
+  }
 }
 
 function hideProgress() {
@@ -226,23 +239,36 @@ async function pollInstall() {
     }
   } catch (error) {
     stopPolling();
-    showError(error instanceof Error ? error.message : "读不到安装进度。");
+    showError(error instanceof Error ? error.message : "读不到安装进度。", activeComponent || "run");
   }
 }
 
 function setBusy(busy) {
   for (const button of Object.values(downloadButtons)) button.disabled = busy;
   deviceSelect.disabled = busy;
+  installSource.disabled = busy;
+  pipSource.disabled = busy;
+  torchSource.disabled = busy;
+  sourceDress.sync();
+  pipDress.sync();
+  torchDress.sync();
+  deviceDress.sync();
 }
 
 async function startInstall(component) {
   setBusy(true);
-  showError("");
+  showError("", component);
   try {
     const response = await hana.api.fetch("kokoro-install", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ component, source: installSource.value, root: installRoot.value.trim() }),
+      body: JSON.stringify({
+        component,
+        source: component === "cpu" ? pipSource.value : component === "gpu" ? torchSource.value : installSource.value,
+        pipSource: pipSource.value,
+        torchSource: torchSource.value,
+        root: installRoot.value.trim(),
+      }),
     });
     const body = await response.json().catch(() => ({}));
     if (!response.ok || !body.ok) throw new Error(body.error || "下载没有启动。");
@@ -253,7 +279,7 @@ async function startInstall(component) {
     stopPolling();
     hideProgress();
     setBusy(false);
-    showError(error instanceof Error ? error.message : "下载没有启动。");
+    showError(error instanceof Error ? error.message : "下载没有启动。", component);
   }
 }
 
@@ -282,6 +308,8 @@ function setPageLocked(locked) {
     element.disabled = locked;
   }
   sourceDress.sync();
+  pipDress.sync();
+  torchDress.sync();
   deviceDress.sync();
 }
 
@@ -310,7 +338,7 @@ async function waitForDevice(target) {
 
 async function startSwitch(target) {
   setPageLocked(true);
-  showError("");
+  showError("", "run");
   setRow("kokoro-device", "loading", "正在切换…");
   try {
     const response = await hana.api.fetch("kokoro-device", {
@@ -323,7 +351,7 @@ async function startSwitch(target) {
     if (body.pending) await waitForDevice(target);
     await loadKokoroStatus();
   } catch (error) {
-    showError(error instanceof Error ? error.message : "切换失败。");
+    showError(error instanceof Error ? error.message : "切换失败。", "run");
     await loadKokoroStatus();
   } finally {
     setPageLocked(false);
@@ -341,10 +369,10 @@ autostopToggle.addEventListener("change", async () => {
     });
     const body = await response.json().catch(() => ({}));
     if (!response.ok || !body.ok) throw new Error(body.error || "没有保存。");
-    showError("");
+    showError("", "run");
   } catch (error) {
     autostopToggle.checked = !enabled;
-    showError(error instanceof Error ? error.message : "没有保存。");
+    showError(error instanceof Error ? error.message : "没有保存。", "run");
   } finally {
     autostopToggle.disabled = false;
   }
@@ -357,7 +385,7 @@ startBtn.addEventListener("click", async () => {
     await callService("kokoro-start");
     await loadKokoroStatus();
   } catch (error) {
-    showError(error instanceof Error ? error.message : "启动失败。");
+    showError(error instanceof Error ? error.message : "启动失败。", "run");
   } finally {
     startBtn.disabled = false;
     startBtn.textContent = "启动";
@@ -371,7 +399,7 @@ stopBtn.addEventListener("click", async () => {
     await callService("kokoro-stop");
     await loadKokoroStatus();
   } catch (error) {
-    showError(error instanceof Error ? error.message : "停止失败。");
+    showError(error instanceof Error ? error.message : "停止失败。", "run");
   } finally {
     stopBtn.disabled = false;
     stopBtn.textContent = "停止";
@@ -388,11 +416,11 @@ savePath.addEventListener("click", async () => {
     });
     const body = await response.json().catch(() => ({}));
     if (!response.ok || !body.ok) throw new Error(body.error || "路径没有保存。");
-    showError("");
+    showError("", "path");
     installRoot.value = body.root;
     await loadKokoroStatus();
   } catch (error) {
-    showError(error instanceof Error ? error.message : "路径没有保存。");
+    showError(error instanceof Error ? error.message : "路径没有保存。", "path");
   } finally {
     savePath.disabled = false;
   }
@@ -400,7 +428,11 @@ savePath.addEventListener("click", async () => {
 
 // ---- 状态区 ----
 
-function showPiece(id, ready) {
+function showPiece(id, ready, failed) {
+  if (failed) {
+    setRow(id, "bad", "读不到状态");
+    return;
+  }
   setRow(id, ready ? "ok" : "bad", ready ? "具备" : "未下载");
 }
 
@@ -419,13 +451,20 @@ async function loadKokoroStatus() {
     installRoot.value = body.path || body.defaultPath || "";
     document.getElementById("kokoro-path").textContent = body.path || "—";
 
-    showPiece("kokoro-model", body.modelReady);
-    showPiece("kokoro-cpu", body.cpuReady);
-    showPiece("kokoro-gpu", body.gpuReady);
+    showPiece("kokoro-model", body.modelReady, body.probeFailed);
+    showPiece("kokoro-cpu", body.cpuReady, body.probeFailed);
+    showPiece("kokoro-gpu", body.gpuReady, body.probeFailed);
+    if (body.probeFailed) {
+      showError(body.probeError || "读不到状态。", "model");
+      showError("", "cpu");
+      showError("", "gpu");
+    }
 
     installSource.hidden = !!body.modelReady;
     downloadModel.hidden = !!body.modelReady;
+    pipSource.hidden = !!body.cpuReady;
     downloadCpu.hidden = !!body.cpuReady;
+    torchSource.hidden = !!body.gpuReady;
     downloadGpu.hidden = !!body.gpuReady;
 
     const cpuOption = deviceSelect.querySelector('option[value="cpu"]');
@@ -463,6 +502,8 @@ async function loadKokoroStatus() {
       hideProgress();
     }
     sourceDress.sync();
+    pipDress.sync();
+    torchDress.sync();
     deviceDress.sync();
   } catch (error) {
     setRow("kokoro-model", "bad", "读不到状态");

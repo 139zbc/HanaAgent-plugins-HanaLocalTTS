@@ -1,10 +1,12 @@
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { defineApp } from "./sdk/app-contract/server-client.js";
 import { KOKORO_VOICES } from "./kokoro-voices.js";
 import { INSTALL_PY_B64, SERVER_PY_B64 } from "./kokoro-files.js";
+import { runHelper } from "./kokoro-runtime.js";
 
 export const name = "hana-local-tts";
 
@@ -120,7 +122,51 @@ function parseVoices(stdout) {
   }).filter(Boolean);
 }
 
-function failureText(error) {
+async function logRouteError(sdk, label, error) {
+  const detail = [error && error.message, error && error.stderr].filter(Boolean).join(" | ").slice(0, 800);
+  await sdk.logger.error(`${label}: ${detail || "no detail"}`);
+}
+
+function psErrorText(raw) {
+  const text = String(raw || "");
+  if (!text.includes("#< CLIXML")) return text;
+  const parts = [];
+  const re = /<S S="Error">([\s\S]*?)<\/S>/g;
+  let match;
+  while ((match = re.exec(text)) !== null) parts.push(match[1]);
+  if (parts.length === 0) return text;
+  return parts.join("\n")
+    .replace(/_x000D_/g, "")
+    .replace(/_x000A_/g, "\n")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
+function usefulLine(raw) {
+  return psErrorText(raw).split(/\r?\n/).map((item) => item.trim()).find((item) => {
+    if (!item || item.startsWith("#<") || item.startsWith("<")) return false;
+    if (item.startsWith("Command failed:")) return false;
+    if (item.startsWith("+ ")) return false;
+    if (/^(CategoryInfo|FullyQualifiedErrorId|所在位置|At line|At char)/.test(item)) return false;
+    return true;
+  }) || "";
+}
+
+function errorDetail(error) {
+  const parts = [
+    error && error.code,
+    error && error.permission,
+    error && error.resource,
+    error && error.message,
+    error && error.stack ? String(error.stack).split("\n").slice(0, 3).join(" | ") : "",
+  ].filter(Boolean);
+  return parts.join(" · ").slice(0, 600);
+}
+
+function failureText(error, label = "朗读失败") {
   const code = error && error.code;
   const raw = `${error && error.message ? error.message : error}\n${error && error.stderr ? error.stderr : ""}`;
   if (/app\/media\.provide/i.test(raw)) {
@@ -130,13 +176,21 @@ function failureText(error) {
     return "还没有「生成媒体」权限。请在设置 → 应用能力里允许，然后重新加载这个 App。";
   }
   if (code === "ERR_ACCESS_DENIED" || /process\.spawn|APP_CAPABILITY_DENIED|EPERM/i.test(raw)) {
-    return "还不能朗读。请在设置里允许这个 App 启动进程，然后重新加载它。";
+    if (label === "朗读失败") return "还不能朗读。请在设置里允许这个 App 启动进程，然后重新加载它。";
+    const what = error && error.permission ? error.permission : "启动子进程";
+    return `${label}：App 进程被宿主限制了（${what}）。请在设置 → 应用能力里允许「启动进程」，然后重新加载这个 App。`;
   }
   if (code === "ETIMEDOUT" || /timed out/i.test(raw)) {
+    if (error && error.kokoro) return "本地 Kokoro 没能在限定时间内启动或读完。请再点一次。";
+    if (label !== "朗读失败") return `${label}：超过了等待时间。`;
     return "这句话太长，系统语音没能在限定时间内读完。请换短一点的消息。";
   }
-  const line = raw.split(/\r?\n/).map((item) => item.trim()).find((item) => item && !item.startsWith("#<") && !item.startsWith("<"));
-  return `朗读失败：${(line || "系统语音没有返回音频。").slice(0, 180)}`;
+  const line = usefulLine(raw);
+  if (line) return `${label}：${line.slice(0, 180)}`;
+  if (code !== undefined && code !== null && code !== "") {
+    return `${label}：没有返回具体原因（PowerShell 退出码 ${code}${error && error.killed ? "，等待超时被终止" : ""}）。`;
+  }
+  return `${label}：${String(error && error.message ? error.message : error).slice(0, 180)}`;
 }
 
 async function powershellPath(sdk) {
@@ -181,105 +235,27 @@ if (-not (Test-Path -LiteralPath $python)) {
 `.trim();
 }
 
-function kokoroStatusScript(root) {
-  return `
-$ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
-$root = '${quotePs(root)}'
-function Get-TorchKind([string]$venv) {
-  $py = Join-Path (Join-Path $venv 'Scripts') 'python.exe'
-  if (-not (Test-Path -LiteralPath $py)) { return '' }
-  $marker = Join-Path $venv 'runtime.json'
-  if (Test-Path -LiteralPath $marker) {
-    try {
-      $parsed = Get-Content -LiteralPath $marker -Raw -Encoding UTF8 | ConvertFrom-Json
-      if ($parsed.device -eq 'cuda' -or $parsed.device -eq 'cpu') { return [string]$parsed.device }
-    } catch {}
-  }
-  $site = Join-Path (Join-Path $venv 'Lib') 'site-packages'
-  if (-not (Test-Path -LiteralPath $site)) { return '' }
-  $dist = @(Get-ChildItem -LiteralPath $site -Directory -Filter 'torch-*.dist-info' -ErrorAction SilentlyContinue | Select-Object -First 1)
-  if ($dist.Count -eq 0) { return '' }
-  if ($dist[0].Name -like '*+cu*') { return 'cuda' }
-  return 'cpu'
-}
-$cpuReady = ((Get-TorchKind (Join-Path $root '.venv-cpu')) -eq 'cpu') -or ((Get-TorchKind (Join-Path $root '.venv')) -eq 'cpu')
-$gpuReady = ((Get-TorchKind (Join-Path $root '.venv-cuda')) -eq 'cuda') -or ((Get-TorchKind (Join-Path $root '.venv')) -eq 'cuda')
-$model = Join-Path (Join-Path (Join-Path (Join-Path $root 'hf-cache') 'models--hexgrad--Kokoro-82M-v1.1-zh') 'snapshots') 'installed'
-$model = Join-Path $model 'kokoro-v1_1-zh.pth'
-$modelReady = Test-Path -LiteralPath $model
-if (-not $modelReady) {
-  $snapRoot = Join-Path (Join-Path (Join-Path $root 'hf-cache') 'models--hexgrad--Kokoro-82M-v1.1-zh') 'snapshots'
-  if (Test-Path -LiteralPath $snapRoot) {
-    $hit = @(Get-ChildItem -LiteralPath $snapRoot -Recurse -Filter 'kokoro-v1_1-zh.pth' -File -ErrorAction SilentlyContinue | Select-Object -First 1)
-    if ($hit.Count -gt 0) { $modelReady = $true }
-  }
-}
-$dirGB = $null
-if (Test-Path -LiteralPath $root) {
-  $sum = (Get-ChildItem -LiteralPath $root -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
-  if ($null -ne $sum) { $dirGB = [Math]::Round($sum / 1GB, 1) }
-}
-$running = $false
-$device = ''
-$servedRoot = ''
-try {
-  $health = Invoke-WebRequest -Uri 'http://127.0.0.1:${KOKORO_PORT}/health' -UseBasicParsing -TimeoutSec 2
-  if ($health.StatusCode -eq 200) {
-    $running = $true
-    $parsed = $health.Content | ConvertFrom-Json
-    $device = $parsed.device
-    $servedRoot = $parsed.root
-  }
-} catch {}
-# 服务在跑，但可能不是这个目录起的：对比服务自报的 root
-$foreign = $false
-$canRun = $modelReady -and ($cpuReady -or $gpuReady)
-if ($running -and $canRun -and $servedRoot) {
-  $a = [IO.Path]::GetFullPath($servedRoot).TrimEnd('\')
-  $b = [IO.Path]::GetFullPath($root).TrimEnd('\')
-  if ($a -ne $b) { $foreign = $true }
-}
-$result = @{ model = $modelReady; cpu = $cpuReady; gpu = $gpuReady; dirGB = $dirGB; running = $running; device = $device; foreign = $foreign }
-$result | ConvertTo-Json -Compress
-`.trim();
-}
-
-async function defaultKokoroRoot(sdk) {
-  const executable = await powershellPath(sdk);
-  if (!executable) return "";
-  const script = `
-$ErrorActionPreference = 'Stop'
-$d = Join-Path (Join-Path (Join-Path (Join-Path $env:USERPROFILE '.hanako') 'app-data') 'hana-local-tts') 'kokoro'
-$d
-`.trim();
-  try {
-    const { stdout } = await runPowerShell(executable, script, 15000);
-    return String(stdout || "").trim();
-  } catch {
-    return "";
-  }
+function defaultKokoroRoot() {
+  return path.join(os.homedir(), ".hanako", "app-data", "hana-local-tts", "kokoro");
 }
 
 async function kokoroStatus(sdk) {
   const root = await kokoroRoot(sdk);
-  const result = { installed: false, modelReady: false, cpuReady: false, gpuReady: false, dirGB: null, running: false, foreign: false, device: "", path: root, defaultPath: await defaultKokoroRoot(sdk), autoStop: await autoStopEnabled(sdk), targetDevice: await kokoroDevice(sdk) };
-  const executable = await powershellPath(sdk);
-  if (!executable) return result;
+  const result = { installed: false, modelReady: false, cpuReady: false, gpuReady: false, dirGB: null, running: false, foreign: false, device: "", path: root, defaultPath: defaultKokoroRoot(), autoStop: await autoStopEnabled(sdk), targetDevice: await kokoroDevice(sdk), probeFailed: false, probeError: "" };
   try {
-    const { stdout } = await runPowerShell(executable, kokoroStatusScript(root), 30000);
-    const parsed = JSON.parse(String(stdout || "").trim());
-    if (parsed) {
-      result.modelReady = parsed.model === true;
-      result.cpuReady = parsed.cpu === true;
-      result.gpuReady = parsed.gpu === true;
-      if (typeof parsed.dirGB === "number") result.dirGB = parsed.dirGB;
-      result.running = parsed.running === true;
-      result.foreign = parsed.foreign === true;
-      if (typeof parsed.device === "string") result.device = parsed.device;
-    }
+    const parsed = await runHelper(sdk, sdk.dataDir, ["probe", "--root", root], { timeoutMs: 30000 });
+    result.modelReady = parsed.model === true;
+    result.cpuReady = parsed.cpu === true;
+    result.gpuReady = parsed.gpu === true;
+    if (typeof parsed.dirGB === "number") result.dirGB = parsed.dirGB;
+    result.running = parsed.running === true;
+    result.foreign = parsed.foreign === true;
+    if (typeof parsed.device === "string") result.device = parsed.device;
   } catch (error) {
-    await sdk.logger.error(`kokoro status check failed: ${failureText(error)}`);
+    // 探测失败和“真的没装”是两回事，页面要分开说。
+    result.probeFailed = true;
+    result.probeError = failureText(error, "读不到状态");
+    await sdk.logger.error(`kokoro status check failed: ${errorDetail(error)}`);
   }
   result.installed = result.modelReady && (result.targetDevice === "cuda" ? result.gpuReady : result.cpuReady);
   await sdk.logger.info(`kokoro status: model=${result.modelReady} cpu=${result.cpuReady} gpu=${result.gpuReady} installed=${result.installed} running=${result.running} device=${result.device || "-"}`);
@@ -343,7 +319,8 @@ async function readHostSpeechPrefs(sdk) {
   const script = `
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-$p = Join-Path (Join-Path (Join-Path $env:USERPROFILE '.hanako') 'user') 'preferences.json'
+$homeDir = if ($env:USERPROFILE) { $env:USERPROFILE } else { [Environment]::GetFolderPath('UserProfile') }
+$p = Join-Path (Join-Path (Join-Path $homeDir '.hanako') 'user') 'preferences.json'
 $j = Get-Content -LiteralPath $p -Raw -Encoding UTF8 | ConvertFrom-Json
 $sg = $j.speechGeneration
 $id = [string]$sg.defaultSpeechModel.id
@@ -416,16 +393,30 @@ function Test-Kokoro {
   }
 }
 ${runtimePythonScript(root, device)}
+${kokoroPidScript(root)}
+${kokoroLaunchPrep(root)}
 if (-not (Test-Kokoro)) {
-  if (-not (Test-Path -LiteralPath $python)) { throw '当前选择的运行环境未下载。' }
-  $env:KOKORO_DEVICE = '${quotePs(device)}'
-  Start-Process -FilePath $python -ArgumentList '${quotePs(server)}' -WorkingDirectory '${quotePs(root)}' -WindowStyle Hidden
-  $deadline = (Get-Date).AddSeconds(80)
+  $existing = @(Get-KokoroPids $root)
+  if ($existing.Count -eq 0) {
+    if (-not (Test-Path -LiteralPath $python)) { throw '当前选择的运行环境未下载。' }
+    $env:KOKORO_DEVICE = '${quotePs(device)}'
+    Start-Process -FilePath $python -ArgumentList '${quotePs(server)}' -WorkingDirectory '${quotePs(root)}' -WindowStyle Hidden -RedirectStandardOutput $log -RedirectStandardError $errLog
+  }
+  $deadline = (Get-Date).AddSeconds(180)
   do {
     Start-Sleep -Milliseconds 500
     if (Test-Kokoro) { break }
   } while ((Get-Date) -lt $deadline)
-  if (-not (Test-Kokoro)) { throw '本地 Kokoro 启动超时。请再点一次朗读。' }
+  if (-not (Test-Kokoro)) {
+    $tail = ''
+    foreach ($file in @($errLog, $log)) {
+      if (Test-Path -LiteralPath $file) {
+        $lines = @(Get-Content -LiteralPath $file -Tail 1 -ErrorAction SilentlyContinue)
+        if ($lines.Count -gt 0 -and $lines[-1]) { $tail = [string]$lines[-1]; break }
+      }
+    }
+    if ($tail) { throw ('本地 Kokoro 启动超时。' + $tail) } else { throw '本地 Kokoro 启动超时。请再点一次朗读。' }
+  }
 }
 $text = [System.IO.File]::ReadAllText('${quotePs(textFile)}', [System.Text.Encoding]::UTF8)
 $json = @{ input = $text.Trim(); voice = '${quotePs(voice)}'; speed = ${clampRate(rate)} } | ConvertTo-Json -Compress
@@ -444,7 +435,12 @@ async function writeSpeechFile(sdk, text, voice, rate, wavFile, engine, play = t
     try {
       const kokoroVoice = kokoroVoiceId(voice);
       const root = await kokoroRoot(sdk);
-      await runPowerShell(executable, kokoroScript(root, textFile, wavFile, kokoroVoice, rate, play, await kokoroDevice(sdk)), KOKORO_TIMEOUT_MS);
+      try {
+        await runPowerShell(executable, kokoroScript(root, textFile, wavFile, kokoroVoice, rate, play, await kokoroDevice(sdk)), 280000);
+      } catch (error) {
+        error.kokoro = true;
+        throw error;
+      }
       await ensureWatcher(sdk);
     } finally {
       await rm(textFile, { force: true });
@@ -701,28 +697,63 @@ function speedTypeError(error) {
 }
 
 // 停止脚本：按端口找 PID，连子进程一起停。输出停掉的 PID 列表（base64）。
-function kokoroStopScript() {
+function kokoroPidScript(root) {
+  return `
+function Get-KokoroPids([string]$rootPath) {
+  $needle = $rootPath.TrimEnd('\\').ToLower()
+  $hits = New-Object System.Collections.Generic.List[int]
+  $procs = @(Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue)
+  foreach ($proc in $procs) {
+    $cmd = [string]$proc.CommandLine
+    if (-not $cmd) { continue }
+    $folded = $cmd.ToLower()
+    if ($folded.Contains('server.py') -and $folded.Contains($needle)) { [void]$hits.Add([int]$proc.ProcessId) }
+  }
+  return $hits
+}
+function Stop-PidTree([int[]]$seeds) {
+  $all = New-Object System.Collections.Generic.HashSet[int]
+  $queue = New-Object System.Collections.Generic.Queue[int]
+  foreach ($seed in $seeds) { if (-not $all.Contains([int]$seed)) { [void]$all.Add([int]$seed); $queue.Enqueue([int]$seed) } }
+  while ($queue.Count -gt 0) {
+    $current = $queue.Dequeue()
+    $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $current" -ErrorAction SilentlyContinue)
+    foreach ($child in $children) {
+      $cid = [int]$child.ProcessId
+      if (-not $all.Contains($cid)) { [void]$all.Add($cid); $queue.Enqueue($cid) }
+    }
+  }
+  $stopped = @()
+  foreach ($p in $all) {
+    try { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue; $stopped += $p } catch {}
+  }
+  return $stopped
+}
+`.trim();
+}
+
+function kokoroLaunchPrep(root) {
+  const quoted = quotePs(root);
+  return `
+$root = '${quoted}'
+$log = Join-Path $root 'tmp\\server.log'
+$errLog = Join-Path '${quoted}' 'tmp\\server.err'
+New-Item -ItemType Directory -Force -Path (Join-Path '${quoted}' 'tmp') | Out-Null
+$modelFile = Join-Path '${quoted}' 'hf-cache\\models--hexgrad--Kokoro-82M-v1.1-zh\\snapshots\\installed\\kokoro-v1_1-zh.pth'
+if (Test-Path -LiteralPath $modelFile) { $env:HF_HUB_OFFLINE = '1' } else { Remove-Item Env:HF_HUB_OFFLINE -ErrorAction SilentlyContinue }
+`.trim();
+}
+
+function kokoroStopScript(root) {
   return `
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-$roots = @(Get-NetTCPConnection -LocalPort ${KOKORO_PORT} -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique)
-if ($roots.Count -eq 0) { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('none')); exit }
-$all = New-Object System.Collections.Generic.HashSet[int]
-$queue = New-Object System.Collections.Generic.Queue[int]
-foreach ($r in $roots) { [void]$all.Add([int]$r); $queue.Enqueue([int]$r) }
-while ($queue.Count -gt 0) {
-  $current = $queue.Dequeue()
-  $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $current" -ErrorAction SilentlyContinue)
-  foreach ($child in $children) {
-    $cid = [int]$child.ProcessId
-    if (-not $all.Contains($cid)) { [void]$all.Add($cid); $queue.Enqueue($cid) }
-  }
-}
-$stopped = @()
-# 先杀父，再杀子，避免孤儿化
-foreach ($p in $all) {
-  try { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue; $stopped += $p } catch {}
-}
+$root = '${quotePs(root)}'
+${kokoroPidScript(root)}
+$seeds = @(Get-KokoroPids $root)
+if ($seeds.Count -eq 0) { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('none')); exit }
+$stopped = @(Stop-PidTree $seeds)
+if ($stopped.Count -eq 0) { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('none')); exit }
 [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($stopped -join ',')))
 `.trim();
 }
@@ -740,43 +771,48 @@ function Test-Kokoro {
   } catch { return $false }
 }
 ${runtimePythonScript(root, device)}
+${kokoroPidScript(root)}
+${kokoroLaunchPrep(root)}
 if (Test-Kokoro) { 'ok'; exit }
-if (-not (Test-Path -LiteralPath $python)) { throw '当前选择的运行环境未下载。' }
-$env:KOKORO_DEVICE = '${quotePs(device)}'
-Start-Process -FilePath $python -ArgumentList '${quotePs(server)}' -WorkingDirectory '${quotePs(root)}' -WindowStyle Hidden
-$deadline = (Get-Date).AddSeconds(120)
+$existing = @(Get-KokoroPids $root)
+if ($existing.Count -eq 0) {
+  if (-not (Test-Path -LiteralPath $python)) { throw '当前选择的运行环境未下载。' }
+  $env:KOKORO_DEVICE = '${quotePs(device)}'
+  Start-Process -FilePath $python -ArgumentList '${quotePs(server)}' -WorkingDirectory '${quotePs(root)}' -WindowStyle Hidden -RedirectStandardOutput $log -RedirectStandardError $errLog
+}
+$deadline = (Get-Date).AddSeconds(180)
 do {
   Start-Sleep -Milliseconds 500
   if (Test-Kokoro) { break }
 } while ((Get-Date) -lt $deadline)
-if (-not (Test-Kokoro)) { throw '启动超时。' }
+if (-not (Test-Kokoro)) {
+  $tail = ''
+  foreach ($file in @($errLog, $log)) {
+    if (Test-Path -LiteralPath $file) {
+      $lines = @(Get-Content -LiteralPath $file -Tail 1 -ErrorAction SilentlyContinue)
+      if ($lines.Count -gt 0 -and $lines[-1]) { $tail = [string]$lines[-1]; break }
+    }
+  }
+  if ($tail) { throw ('启动超时。' + $tail) } else { throw '启动超时。' }
+}
 'ok'
 `.trim();
 }
 
 // 守护脚本：盯住 Hana 主进程，它退出就停掉 Kokoro（连子进程一起停）。
 // 由 App 用 Start-Process 拉起，独立于 Hana 生命周期。
-function kokoroWatchScript() {
+function kokoroWatchScript(root) {
   return `
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+${kokoroPidScript(root)}
 $watched = Get-Process HanaAgent -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $watched) { exit }
 while ($true) {
   Start-Sleep -Seconds 5
   if (-not (Get-Process -Id $watched.Id -ErrorAction SilentlyContinue)) {
-    $roots = @(Get-NetTCPConnection -LocalPort ${KOKORO_PORT} -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique)
-    foreach ($top in $roots) {
-      $queue = New-Object System.Collections.Generic.Queue[int]
-      $seen = New-Object System.Collections.Generic.HashSet[int]
-      [void]$seen.Add([int]$top); $queue.Enqueue([int]$top)
-      while ($queue.Count -gt 0) {
-        $cur = $queue.Dequeue()
-        $kids = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $cur" -ErrorAction SilentlyContinue)
-        foreach ($k in $kids) { $kid = [int]$k.ProcessId; if (-not $seen.Contains($kid)) { [void]$seen.Add($kid); $queue.Enqueue($kid) } }
-      }
-      foreach ($p in $seen) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }
-    }
+    $seeds = @(Get-KokoroPids '${quotePs(root)}')
+    if ($seeds.Count -gt 0) { Stop-PidTree $seeds | Out-Null }
     exit
   }
 }
@@ -788,7 +824,8 @@ async function savedSpeed(sdk) {
   if (!executable) return 1;
   const script = `
 $ErrorActionPreference = 'Stop'
-$p = Join-Path (Join-Path (Join-Path $env:USERPROFILE '.hanako') 'user') 'preferences.json'
+$homeDir = if ($env:USERPROFILE) { $env:USERPROFILE } else { [Environment]::GetFolderPath('UserProfile') }
+$p = Join-Path (Join-Path (Join-Path $homeDir '.hanako') 'user') 'preferences.json'
 $j = Get-Content -LiteralPath $p -Raw -Encoding UTF8 | ConvertFrom-Json
 $sg = $j.speechGeneration
 $id = [string]$sg.defaultSpeechModel.id
@@ -833,6 +870,8 @@ async function synthesize(sdk, text) {
 }
 
 const KOKORO_INSTALL_SOURCES = { modelscope: "modelscope", "hf-mirror": "hf-mirror", huggingface: "huggingface" };
+const KOKORO_PIP_SOURCES = { tuna: "tuna", aliyun: "aliyun", pypi: "pypi" };
+const KOKORO_TORCH_SOURCES = { pytorch: "pytorch", nju: "nju" };
 let installStartedAt = 0;
 
 async function readInstallState(sdk, root) {
@@ -869,7 +908,50 @@ if (Test-Path -LiteralPath $p) {
   return state;
 }
 
-async function startKokoroInstall(sdk, root, source, component, workDir) {
+function python312Script() {
+  return `
+$base = ''
+$profileDir = [Environment]::GetFolderPath('UserProfile')
+if (-not $profileDir) { $profileDir = $env:USERPROFILE }
+$roots = New-Object System.Collections.Generic.List[string]
+foreach ($item in @($env:APPDATA, $env:LOCALAPPDATA, [Environment]::GetFolderPath('ApplicationData'))) {
+  if ($item) { [void]$roots.Add([string]$item) }
+}
+if ($profileDir) { [void]$roots.Add((Join-Path $profileDir 'AppData\\Roaming')) }
+foreach ($r in $roots) {
+  $uvRoot = Join-Path $r 'uv\\python'
+  if (-not (Test-Path -LiteralPath $uvRoot)) { continue }
+  $all = @(Get-ChildItem -LiteralPath $uvRoot -Directory -Filter 'cpython-3.12*' -ErrorAction SilentlyContinue |
+    Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'python.exe') })
+  if ($all.Count -eq 0) { continue }
+  $exact = @($all | Where-Object { $_.Name -match '^cpython-3\\.12\\.\\d' } | Sort-Object Name -Descending)
+  $pick = if ($exact.Count -gt 0) { $exact[0] } else { $all[0] }
+  $base = Join-Path $pick.FullName 'python.exe'
+  break
+}
+if (-not $base) {
+  $pyCmd = Get-Command py -ErrorAction SilentlyContinue
+  if ($pyCmd) {
+    $oldPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $listed = @(& py -0p 2>$null)
+    $ErrorActionPreference = $oldPreference
+    foreach ($row in $listed) {
+      if ([string]$row -notmatch '3\\.12') { continue }
+      $candidate = ([string]$row).Trim() -split '\\s+' | Select-Object -Last 1
+      if ($candidate -and (Test-Path -LiteralPath $candidate)) { $base = $candidate; break }
+    }
+  }
+}
+if (-not $base -or -not (Test-Path -LiteralPath $base)) {
+  $seen = ($roots | Select-Object -Unique) -join '; '
+  throw "找不到 Python 3.12。需要 3.12 的任意小版本（推荐用 uv 安装）。已查找：$seen"
+}
+Write-Output "python=[$base]"
+`.trim();
+}
+
+async function startKokoroInstall(sdk, root, source, pipSource, torchSource, component, workDir) {
   // 同一时刻只允许一个下载。上一件已经完成或失败时，可以接着下另一件。
   if (installStartedAt && Date.now() - installStartedAt < 30 * 60 * 1000) {
     const current = await readInstallState(sdk, root);
@@ -893,19 +975,28 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $root = '${quotePs(root)}'
 New-Item -ItemType Directory -Force -Path $root | Out-Null
-$serverB64 = (Get-Content -LiteralPath '${quotePs(serverB64File)}' -Raw).Trim()
-$installB64 = (Get-Content -LiteralPath '${quotePs(installB64File)}' -Raw).Trim()
-[IO.File]::WriteAllBytes((Join-Path $root 'server.py'), [Convert]::FromBase64String($serverB64))
-[IO.File]::WriteAllBytes((Join-Path $root 'install.py'), [Convert]::FromBase64String($installB64))
-$base = 'C:\\Users\\' + $env:USERNAME + '\\AppData\\Roaming\\uv\\python\\cpython-3.12.14-windows-x86_64-none\\python.exe'
-if (-not (Test-Path -LiteralPath $base)) {
-  $found = & py -V:Astral/CPython3.12.14 -c "import sys; print(sys.executable)" 2>$null
-  if ($found) { $base = $found.Trim() }
+$diag = Join-Path $root 'tmp\\launch.log'
+try {
+  $serverB64 = (Get-Content -LiteralPath '${quotePs(serverB64File)}' -Raw).Trim()
+  $installB64 = (Get-Content -LiteralPath '${quotePs(installB64File)}' -Raw).Trim()
+  [IO.File]::WriteAllBytes((Join-Path $root 'server.py'), [Convert]::FromBase64String($serverB64))
+  [IO.File]::WriteAllBytes((Join-Path $root 'install.py'), [Convert]::FromBase64String($installB64))
+${python312Script()}
+  $installer = Join-Path $root 'install.py'
+  Start-Process -FilePath $base -ArgumentList @($installer, '--root', $root, '--source', '${quotePs(source)}', '--pip-source', '${quotePs(pipSource)}', '--torch-source', '${quotePs(torchSource)}', '--component', '${quotePs(component)}') -WorkingDirectory $root -WindowStyle Hidden
+  'ok'
+} catch {
+  $detail = ($_ | Out-String)
+  $nl = [Environment]::NewLine
+  $env1 = "APPDATA=[$env:APPDATA] USERPROFILE=[$env:USERPROFILE] LOCALAPPDATA=[$env:LOCALAPPDATA]"
+  $folder = [Environment]::GetFolderPath('ApplicationData')
+  $text = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')$nl$env1$nlApplicationData=[$folder]$nl$detail"
+  try {
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $diag) | Out-Null
+    [IO.File]::WriteAllText($diag, $text, (New-Object Text.UTF8Encoding $false))
+  } catch {}
+  throw $detail
 }
-if (-not (Test-Path -LiteralPath $base)) { throw '找不到 Python 3.12。请先安装 Python 3.12（推荐用 uv）。' }
-$installer = Join-Path $root 'install.py'
-Start-Process -FilePath $base -ArgumentList @($installer, '--root', $root, '--source', '${quotePs(source)}', '--component', '${quotePs(component)}') -WorkingDirectory $root -WindowStyle Hidden
-'ok'
 `.trim();
     const { stdout } = await runPowerShell(executable, script, 120000);
     if (!String(stdout || "").includes("ok")) throw new Error("安装进程没有启动。");
@@ -994,7 +1085,7 @@ async function startKokoroService(sdk) {
   const executable = await powershellPath(sdk);
   if (!executable) throw new Error("找不到 Windows PowerShell。");
   const device = await kokoroDevice(sdk);
-  const { stdout } = await runPowerShell(executable, kokoroStartScript(root, device), 120000);
+  const { stdout } = await runPowerShell(executable, kokoroStartScript(root, device), 200000);
   if (!String(stdout || "").includes("ok")) throw new Error("启动没有成功。");
   await ensureWatcher(sdk);
   return { ok: true };
@@ -1007,9 +1098,14 @@ function kokoroSpawnScript(root, device) {
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 ${runtimePythonScript(root, device)}
-if (-not (Test-Path -LiteralPath $python)) { throw '当前选择的运行环境未下载。' }
-$env:KOKORO_DEVICE = '${quotePs(device)}'
-Start-Process -FilePath $python -ArgumentList '${quotePs(server)}' -WorkingDirectory '${quotePs(root)}' -WindowStyle Hidden
+${kokoroPidScript(root)}
+${kokoroLaunchPrep(root)}
+$existing = @(Get-KokoroPids $root)
+if ($existing.Count -eq 0) {
+  if (-not (Test-Path -LiteralPath $python)) { throw '当前选择的运行环境未下载。' }
+  $env:KOKORO_DEVICE = '${quotePs(device)}'
+  Start-Process -FilePath $python -ArgumentList '${quotePs(server)}' -WorkingDirectory '${quotePs(root)}' -WindowStyle Hidden -RedirectStandardOutput $log -RedirectStandardError $errLog
+}
 'spawned'
 `.trim();
 }
@@ -1052,7 +1148,8 @@ try {
 async function stopKokoroService(sdk) {
   const executable = await powershellPath(sdk);
   if (!executable) throw new Error("找不到 Windows PowerShell。");
-  const { stdout } = await runPowerShell(executable, kokoroStopScript(), 30000);
+  const root = await kokoroRoot(sdk);
+  const { stdout } = await runPowerShell(executable, kokoroStopScript(root), 30000);
   const b64 = String(stdout || "").trim().split(/\r?\n/).filter((line) => /^[A-Za-z0-9+/=]+$/.test(line.trim())).pop() || "";
   const stopped = b64 ? Buffer.from(b64, "base64").toString("utf8") : "none";
   await sdk.logger.info(`kokoro stopped: ${stopped}`);
@@ -1105,7 +1202,7 @@ $existing = @(Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -E
   // watcher 脚本很长（base64 后超过命令行 32KB 上限），必须先写文件再用 -File 执行
   const scriptFile = path.join(sdk.dataDir, "kokoro-watch.ps1");
   await mkdir(path.dirname(scriptFile), { recursive: true });
-  await writeFile(scriptFile, kokoroWatchScript(), "utf8");
+  await writeFile(scriptFile, kokoroWatchScript(await kokoroRoot(sdk)), "utf8");
   const script = `
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -1189,10 +1286,21 @@ export default defineApp(async (sdk) => {
         body = null;
       }
       try {
-        const source = KOKORO_INSTALL_SOURCES[body && body.source] || "modelscope";
         const component = body && body.component;
         if (component !== "model" && component !== "cpu" && component !== "gpu") {
           return c.json({ ok: false, error: "要指定下载模型、CPU 运行环境或 GPU 运行环境。" }, 400);
+        }
+        const requested = body && body.source;
+        const pipSource = KOKORO_PIP_SOURCES[body && body.pipSource] || KOKORO_PIP_SOURCES[requested] || "tuna";
+        const torchSource = KOKORO_TORCH_SOURCES[body && body.torchSource] || KOKORO_TORCH_SOURCES[requested] || "nju";
+        let source = "modelscope";
+        if (component === "model") {
+          source = KOKORO_INSTALL_SOURCES[requested];
+          if (!source) return c.json({ ok: false, error: "不认识的模型下载源。" }, 400);
+        } else if (component === "cpu") {
+          source = KOKORO_PIP_SOURCES[requested] || pipSource;
+        } else {
+          source = KOKORO_TORCH_SOURCES[requested] || torchSource;
         }
         const root = cleanInstallPath(body && body.root) || (await kokoroRoot(sdk));
         await sdk.config.setMany({ kokoroRoot: root });
@@ -1204,10 +1312,11 @@ export default defineApp(async (sdk) => {
           const gpu = await checkGpuHardware(sdk);
           if (!gpu.ok) return c.json({ ok: false, error: gpu.error }, 400);
         }
-        const result = await startKokoroInstall(sdk, root, source, component, sdk.dataDir);
+        const result = await startKokoroInstall(sdk, root, source, pipSource, torchSource, component, sdk.dataDir);
         return c.json(result);
       } catch (error) {
-        return c.json({ ok: false, error: failureText(error) }, 500);
+        await logRouteError(sdk, "kokoro install failed", error);
+        return c.json({ ok: false, error: failureText(error, "下载失败") }, 500);
       }
     });
 
@@ -1240,7 +1349,8 @@ export default defineApp(async (sdk) => {
         const result = await startKokoroService(sdk);
         return c.json(result);
       } catch (error) {
-        return c.json({ ok: false, error: failureText(error) }, 500);
+        await logRouteError(sdk, "kokoro start failed", error);
+        return c.json({ ok: false, error: failureText(error, "启动失败") }, 500);
       }
     });
 
@@ -1252,7 +1362,8 @@ export default defineApp(async (sdk) => {
         const result = await stopKokoroService(sdk);
         return c.json(result);
       } catch (error) {
-        return c.json({ ok: false, error: failureText(error) }, 500);
+        await logRouteError(sdk, "kokoro stop failed", error);
+        return c.json({ ok: false, error: failureText(error, "停止失败") }, 500);
       }
     });
 
@@ -1288,7 +1399,8 @@ export default defineApp(async (sdk) => {
         await sdk.logger.info(`kokoro device switch started toward ${target}`);
         return c.json({ ok: true, device: target, pending: true });
       } catch (error) {
-        return c.json({ ok: false, error: failureText(error) }, 500);
+        await logRouteError(sdk, "kokoro device switch failed", error);
+        return c.json({ ok: false, error: failureText(error, "切换失败") }, 500);
       }
     });
 

@@ -3,6 +3,15 @@ import json
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+ROOT = os.path.dirname(os.path.abspath(__file__))
+_MODEL = os.path.join(
+    ROOT, "hf-cache", "models--hexgrad--Kokoro-82M-v1.1-zh", "snapshots", "installed", "kokoro-v1_1-zh.pth",
+)
+if os.path.isfile(_MODEL):
+    os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ.setdefault("HF_HUB_CACHE", os.path.join(ROOT, "hf-cache"))
+os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+
 import soundfile as sf
 import torch
 from kokoro import KPipeline
@@ -12,10 +21,6 @@ REPO_ID = "hexgrad/Kokoro-82M-v1.1-zh"
 DEFAULT_VOICE = "zf_094"
 PORT = int(os.environ.get("KOKORO_PORT", "8765"))
 DEVICE = "cuda" if os.environ.get("KOKORO_DEVICE", "cpu") == "cuda" and torch.cuda.is_available() else "cpu"
-
-ROOT = os.path.dirname(__file__)
-os.environ.setdefault("HF_HUB_CACHE", os.path.join(ROOT, "hf-cache"))
-os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 TMP = os.path.join(ROOT, "tmp")
 os.makedirs(TMP, exist_ok=True)
 os.environ["TEMP"] = TMP

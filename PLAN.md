@@ -133,6 +133,41 @@
 
 **怎么检查**：打开这个 App 的设置。三行状态和这台电脑的实情一致（已有的那套应是「具备」）。另一套显示「未下载」。先下好 GPU 再切过去，不应再出现大体积下载。切回 CPU 仍用原来的环境。只具备其中一套时，另一套不能被选中启动。
 
+### M14 — 去掉 PowerShell 调度 + 自动装 Python（2026-10-27 确认，先做 M14-1）
+
+**起因**：最近两个 bug（模型下载失败、报错只显示“退出码 1”）都出在 PowerShell 上——报错是 CLIXML 格式被过滤掉、脚本拼在 JS 模板字符串里反斜杠被吞、宿主清空了子进程的环境变量导致 `APPDATA` 取不到。三次排查都绕在同一个地方。
+
+**三个已核实的事实**（决定了方案形状）：
+1. App 的 Node 进程受 Node 权限模型限制：只能读安装目录和 `{HANA_HOME}/app-data/{appId}`，**读不到用户选的安装目录，也不能自己连 127.0.0.1**。所以 Node 只能当调度员，碰盘和碰端口的活必须交给 spawn 出去的子进程。
+2. spawn 出去的子进程不受 Node 权限模型限制（现在的 PowerShell 就是靠这个读 `D:\tmp`），但**宿主会清空子进程的环境变量**。所以：路径一律用绝对路径，子进程 env 显式传。
+3. `sdk.runtime` 受管运行时在 Windows 上需要管理员初始化沙箱助手（本机实测 `ready:false`），对“另一台电脑”反而是负担，**不用它**。下载也不用 App 自己联网（避免触发宿主二次审核），交给 `curl.exe` / 子进程。
+
+**做法**：插件变成「Node 调度 → Python 干活」。
+- 新增 `kokoro/helper.py`：纯标准库的助手，每个子命令只往 stdout 写一行 JSON。
+- 新增 `hana-local-tts/kokoro-runtime.js`：找 Python、落助手、调子命令、解析结果、统一错误。
+- `kokoro/helper.py` 以 base64 内嵌在 `kokoro-files.js` 里，首次用到时写进 app-data。
+
+**已定的三件事**：
+- Python 版本固定 **3.12.14**（下载时用这个版本）。
+- 下载的 Python 放 **app-data**（`{HANA_HOME}/app-data/hana-local-tts/python`），不跟模型目录在一起。
+- 顺序：先做 M14-1。
+
+**分步**：
+
+| 步骤 | 内容 | 怎么验收 |
+|---|---|---|
+| M14-1 | 助手 + 运行时骨架；状态探测从 PowerShell 换成 Node→助手 | 设置页三行状态正确；日志里不再有状态检查的 PowerShell 调用 |
+| M14-2 | 安装调度搬家：Node 直接 spawn `install.py`，进度镜像到 app-data 供 Node 读 | 删掉模型目录→点下载→模型重新下好；CPU 依赖走清华源能跑通 |
+| M14-3 | 服务启停搬家：`start/stop/watch` 全走 Node→助手 | 启动/停止正常；停后不留 `server.py` 进程；关掉 Hana 服务自己没 |
+| M14-4 | 自动下载 Python 3.12.14（`curl.exe` 下载 + `tar.exe` 解包）+ 设置页加一行「Python 运行环境」 | 强制走下载分支能装上并跑通 |
+
+**不做什么**：不动系统语音（System.Speech）和本地播放，仍走 PowerShell；不读宿主 `preferences.json`（在 app-data 外），仍走 PowerShell；不引进 uv；不给插件加网络权限；不做断点续传下载器。
+
+**M14-1 结果**：已通过。助手 `probe` 子命令的输出与实情一致（模型目录 model=true、app-data 目录 model/cpu/gpu 全 true、目录体积对得上）。
+- 踩过的坑：① 助手一开始把 `--root` 当位置参数取，探测结果全 false；改成通用参数解析后正常。② 助手原来要先写一份 `kokoro-helper.py` 到 app-data，结果 App 进程写不了（报 `ERR_ACCESS_DENIED`），页面却把它说成“不能启动子进程”，方向完全错了。改成**不落盘**：助手源码直接用 `python -c` 传进去执行，只靠“能读能执行”就行。③ 报错文案会把 `ERR_ACCESS_DENIED` 一律当成“缺启动进程权限”，以后要按 `error.permission` 分清是文件读写被拒还是子进程被拒。
+- 现状：0.8.0 之后的安装包都是通过导入 zip 装的（不是拷文件），装完会在账本里重新记授权；`app/process.spawn` 当前是 allowed。
+- App 进程的硬限制（实测）：Node 权限模型对 `fs` 是**拒绝就抛异常**，不是返回 false。App 只能读安装目录和 app-data，碰用户目录直接 `ERR_ACCESS_DENIED · FileSystemRead`。所以：① 所有 `existsSync`/读文件必须包 try/catch；② 不能直接跑用户目录里的 `python.exe`，改用 `C:\Windows\py.exe` 按标签拉起（`-V:Astral/CPython3.12.14` 这种厂商标签，`py -3.12` 对 uv 装的无效）；③ 助手代码用 `python -c` 传进去执行，不落盘。
+
 ## 风险与代价清单
 
 | 风险 | 影响 | 对策 |
@@ -173,3 +208,7 @@
 - [x] M12-2 面板加操作（试读、启停）+ 修掉试读误报失败、语速与多媒体不一致两个 bug
 - [ ] M12-3 设置页视觉统一
 - [ ] M13 模型 / CPU 运行环境 / GPU 运行环境分开显示和下载（状态：具备、未下载）
+- [ ] M14-1 助手 + 运行时骨架，状态探测去掉 PowerShell
+- [ ] M14-2 安装调度搬到 Node
+- [ ] M14-3 服务启停搬到 Node
+- [ ] M14-4 自动下载 Python 3.12.14

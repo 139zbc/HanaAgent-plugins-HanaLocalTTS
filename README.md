@@ -19,7 +19,7 @@
 
 改完插件后，把 `hana-local-tts` 复制到 `C:\Users\Fantasy\.hanako\apps\hana-local-tts`，Hana 里打开的才是这份。
 
-下一步：在 Hana 里打开这个 App 的设置，确认三行状态。看过效果后再用 Git 存档。
+下一步：重新加载这个 App。设置页的三行状态改成由 Python 助手探测（不再走 PowerShell）。模型已经下到上面那个路径。接着可以点 CPU 运行环境的下载试试清华源。看过效果后再用 Git 存档。
 
 ## 开发约定
 

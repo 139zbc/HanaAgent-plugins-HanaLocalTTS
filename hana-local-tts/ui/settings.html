@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>本地语音朗读</title>
   <link rel="stylesheet" href="./assets/app.css?v=3">
-  <link rel="stylesheet" href="./assets/settings.css?v=8">
+  <link rel="stylesheet" href="./assets/settings.css?v=9">
 </head>
 <body>
   <main>
@@ -33,6 +33,7 @@
             <div class="progress-bar"><div class="progress-fill" id="fill-model"></div></div>
             <p class="hint" id="message-model"></p>
           </div>
+          <p class="row-error" id="error-model" role="alert" hidden></p>
         </div>
 
         <div class="piece" data-component="cpu">
@@ -42,6 +43,11 @@
               <span class="row-desc" id="kokoro-cpu" data-state="loading">正在查看…</span>
             </div>
             <span class="actions">
+              <select id="pip-source">
+                <option value="tuna" selected>清华源（国内，推荐）</option>
+                <option value="aliyun">阿里源（国内备选）</option>
+                <option value="pypi">PyPI（海外直连）</option>
+              </select>
               <button id="download-cpu" type="button" class="small" hidden>下载</button>
             </span>
           </div>
@@ -49,6 +55,7 @@
             <div class="progress-bar"><div class="progress-fill" id="fill-cpu"></div></div>
             <p class="hint" id="message-cpu"></p>
           </div>
+          <p class="row-error" id="error-cpu" role="alert" hidden></p>
         </div>
 
         <div class="piece" data-component="gpu">
@@ -58,6 +65,10 @@
               <span class="row-desc" id="kokoro-gpu" data-state="loading">正在查看…</span>
             </div>
             <span class="actions">
+              <select id="torch-source">
+                <option value="nju" selected>南大镜像（国内，推荐）</option>
+                <option value="pytorch">PyTorch 官方</option>
+              </select>
               <button id="download-gpu" type="button" class="small" hidden>下载</button>
             </span>
           </div>
@@ -65,6 +76,7 @@
             <div class="progress-bar"><div class="progress-fill" id="fill-gpu"></div></div>
             <p class="hint" id="message-gpu"></p>
           </div>
+          <p class="row-error" id="error-gpu" role="alert" hidden></p>
         </div>
 
         <div class="row">
@@ -77,6 +89,7 @@
             <button id="kokoro-stop" type="button" class="small" hidden>停止</button>
           </span>
         </div>
+        <p class="row-error" id="error-run" role="alert" hidden></p>
 
         <div class="row">
           <div class="text">
@@ -108,7 +121,6 @@
             <span class="slider"></span>
           </label>
         </div>
-        <p class="hint" id="install-error" role="alert" hidden></p>
       </div>
     </section>
 
@@ -127,6 +139,7 @@
             <button id="save-path" type="button" class="primary">保存</button>
           </div>
         </div>
+        <p class="row-error" id="error-path" role="alert" hidden></p>
       </div>
     </section>
 
@@ -147,6 +160,6 @@
       </div>
     </section>
   </main>
-  <script type="module" src="./assets/settings.js?v=9"></script>
+  <script type="module" src="./assets/settings.js?v=11"></script>
 </body>
 </html>

@@ -293,7 +293,7 @@ body.page-locked .tts-select-trigger { pointer-events: none; }
 .progress-bar { height: 6px; border-radius: 3px; background: color-mix(in srgb, var(--tts-line) 50%, transparent); overflow: hidden; }
 .progress-fill { height: 100%; width: 0; background: var(--tts-ok); transition: width 0.5s; }
 
-#install-error { padding: 0 16px 12px; color: var(--tts-err); }
+.row-error { padding: 0 16px 12px; color: var(--tts-err); }
 
 /* 窄栏：控件换到下一行，避免挤压文字 */
 @media (max-width: 380px) {
