@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>本地语音朗读</title>
-  <link rel="stylesheet" href="./assets/app.css?v=4">
-  <link rel="stylesheet" href="./assets/panel.css?v=5">
+  <link rel="stylesheet" href="./assets/app.css?v=5">
+  <link rel="stylesheet" href="./assets/panel.css?v=6">
 </head>
 <body>
   <main class="panel">
@@ -33,8 +33,21 @@
           <span class="row-desc" id="v-rate" data-state="loading">—</span>
         </div>
       </div>
-      <div class="foot">
-        <button type="button" class="primary" id="btn-speak">试读一句</button>
+    </section>
+
+    <section class="card">
+      <div class="row">
+        <div class="text">
+          <span class="row-title">试听</span>
+          <span class="row-desc">写点想听的内容，按当前的声音和语速读出来。</span>
+        </div>
+      </div>
+      <div class="try-box">
+        <textarea id="try-text" rows="4" maxlength="500" spellcheck="false" placeholder="想听什么就写什么…"></textarea>
+        <div class="try-foot">
+          <span class="try-count" id="try-count">0 / 500 字</span>
+          <button type="button" class="primary" id="btn-speak">朗读这段文字</button>
+        </div>
       </div>
     </section>
 
@@ -71,6 +84,6 @@
       if (sub) sub.textContent = '页面没起来。请看 App 详情里的报错。';
     }, true);
   </script>
-  <script type="module" src="./assets/panel.js?v=5"></script>
+  <script type="module" src="./assets/panel.js?v=6"></script>
 </body>
 </html>

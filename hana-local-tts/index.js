@@ -10,6 +10,7 @@ import { runHelper, spawnDetached, startInstall, writeAppSources, portablePython
 export const name = "hana-local-tts";
 
 const SPEECH_TEXT_MAX_BYTES = 32 * 1024; // 宿主的语音文本预算
+const SPEAK_TEXT_MAX_CHARS = 500; // 面板试听输入的上限
 const SPEAK_TIMEOUT_MS = 25000;
 const KOKORO_TIMEOUT_MS = 90000;
 const KOKORO_ROOT_DEFAULT = "D:\\ProgramData\\OH-WorkSpace\\hanako\\kokoro-zh";
@@ -962,7 +963,7 @@ export default defineApp(async (sdk) => {
     app.post("/probe", async (c) => {
       if (speechProviderError) return c.json({ ok: false, error: speechProviderError }, 500);
       try {
-        const result = await requestSpeech(sdk, "欢迎使用Hana Agent本地语音朗读 A P P");
+        const result = await requestSpeech(sdk, "Hana Agent 的本地语音朗读，正常。");
         const taskId = result?.tasks?.[0]?.taskId;
         if (!taskId) return c.json({ ok: false, error: "宿主没有返回语音任务。", result }, 500);
         const task = await waitForSpeechTask(sdk, taskId);
@@ -972,6 +973,52 @@ export default defineApp(async (sdk) => {
           error: completed ? "" : (task?.failReason || (speechTaskFailed(task) ? "语音合成没有成功。" : "语音任务没有在限定时间内完成。")),
           taskId,
           status: task?.status || "pending",
+        }, completed ? 200 : 500);
+      } catch (error) {
+        return c.json({ ok: false, error: failureText(error) }, 500);
+      }
+    });
+
+    // 面板的「试听」：把用户输入的任意文字走同一条宿主语音链路读出来。
+    // 声音和语速不在这里选：宿主会按「多媒体 → 语音合成」里真正生效的那份设置来解析。
+    app.post("/speak", async (c) => {
+      if (speechProviderError) return c.json({ ok: false, error: speechProviderError }, 500);
+      let body;
+      try {
+        body = await c.req.json();
+      } catch {
+        return c.json({ ok: false, error: "请求不是 JSON。" }, 400);
+      }
+      const text = typeof body?.text === "string" ? body.text.trim() : "";
+      if (!text) return c.json({ ok: false, error: "先写点要读的内容。" }, 400);
+      const chars = Array.from(text).length;
+      if (chars > SPEAK_TEXT_MAX_CHARS) {
+        return c.json({ ok: false, error: `这段太长了（约 ${chars} 字），上限 ${SPEAK_TEXT_MAX_CHARS} 字。` }, 400);
+      }
+      try {
+        const result = await requestSpeech(sdk, text);
+        const tasks = Array.isArray(result?.tasks) ? result.tasks : [];
+        const taskIds = tasks.map((item) => item?.taskId).filter((value) => typeof value === "string" && value);
+        if (taskIds.length === 0) return c.json({ ok: false, error: "宿主没有返回语音任务。" }, 500);
+        // 宿主可能把长文拆成多个任务，每个都要等到落地。
+        let completed = true;
+        let failReason = "";
+        for (const taskId of taskIds) {
+          const task = await waitForSpeechTask(sdk, taskId);
+          if (!speechTaskDone(task)) {
+            completed = false;
+            failReason = task?.failReason || (speechTaskFailed(task) ? "语音合成没有成功。" : "语音任务没有在限定时间内完成。");
+            break;
+          }
+        }
+        return c.json({
+          ok: completed,
+          error: completed ? "" : failReason,
+          taskId: taskIds[0],
+          status: completed ? "done" : "failed",
+          // 切了段时任务会在音频播完之前就完成，页面要据此换一句提示。
+          // 依据是适配器内部的分段数：切了段就是后台流水播放，任务先返回、音频后放完。
+          segments: splitIntoSegments(text).length,
         }, completed ? 200 : 500);
       } catch (error) {
         return c.json({ ok: false, error: failureText(error) }, 500);

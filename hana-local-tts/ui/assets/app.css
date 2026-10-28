@@ -285,6 +285,31 @@ input[type="text"].mono {
   font-family: var(--font-mono, Consolas, monospace);
 }
 
+/* 多行输入框。和上面的单行输入框同风格，只是高度和行高不一样。 */
+textarea {
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--tts-text);
+  background: var(--tts-surface);
+  border: var(--tts-border-width) solid var(--tts-card-border);
+  border-radius: var(--tts-control-radius);
+  padding: 8px 10px;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  resize: vertical;
+}
+
+textarea:hover {
+  background: var(--overlay-subtle, rgba(0, 0, 0, 0.03));
+}
+
+textarea:focus {
+  outline: none;
+  border-color: var(--tts-accent);
+}
+
 /* 窄栏：控件换到下一行，避免挤压文字。两个页面同一套。 */
 @media (max-width: 380px) {
   .row { flex-wrap: wrap; gap: 10px; }

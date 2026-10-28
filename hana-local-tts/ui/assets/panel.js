@@ -3,6 +3,14 @@ import { followHostTheme } from './theme.js';
 
 const $ = (id) => document.getElementById(id);
 
+// 试听输入框的默认预填语。三行各管一件事：开场验音调，中间埋多音字，末尾压数字和英文。
+const DEFAULT_TRY_TEXT = [
+  '你好，我是 Hana Agent 的本地语音朗读。',
+  '重庆的银行行长，重要的事情说三遍。',
+  '2026 年 10 月 28 日，Hana Agent v2，帮我把这段话读出来。',
+].join('\n');
+const TRY_TEXT_MAX_CHARS = 500;
+
 const ui = {
   sub: $('panel-sub'),
   engine: $('v-engine'),
@@ -19,6 +27,8 @@ const ui = {
   serviceFoot: $('service-foot'),
   serviceBtn: $('btn-service'),
   speakBtn: $('btn-speak'),
+  tryText: $('try-text'),
+  tryCount: $('try-count'),
 };
 
 // 当前 Kokoro 状态。启停按钮按它显示，null 表示还没读到。
@@ -71,8 +81,13 @@ async function getJson(path) {
   return body;
 }
 
-async function postJson(path) {
-  const response = await hana.api.fetch(path, { method: 'POST' });
+async function postJson(path, payload) {
+  const init = { method: 'POST' };
+  if (payload !== undefined) {
+    init.headers = { 'Content-Type': 'application/json' };
+    init.body = JSON.stringify(payload);
+  }
+  const response = await hana.api.fetch(path, init);
   const body = await response.json().catch(() => ({}));
   if (!response.ok || body.error || body.ok === false) {
     throw new Error(body.error || '操作没有成功。');
@@ -215,19 +230,43 @@ ui.retry.addEventListener('click', () => {
   load();
 });
 
-// 试读一句：走宿主语音合成供应商，和设置页的「试一下合成」同一条路。
+// 试听：把输入框里的字走宿主语音合成供应商，和设置页的「试一下合成」同一条路。
+// 声音和语速不在这里选：宿主会按「多媒体 → 语音合成」里真正生效的那份设置来解析。
+function tryTextValue() {
+  return ui.tryText.value.trim();
+}
+
+function renderTryCount() {
+  const count = Array.from(tryTextValue()).length;
+  ui.tryCount.textContent = `${count} / ${TRY_TEXT_MAX_CHARS} 字`;
+  return count;
+}
+
+ui.tryText.addEventListener('input', () => {
+  renderTryCount();
+  // 空内容不送：后端会拒，页面先自己拦住。
+  ui.speakBtn.disabled = tryTextValue().length === 0;
+});
+
 ui.speakBtn.addEventListener('click', async () => {
+  const text = tryTextValue();
+  if (!text) {
+    setMessage('先写点要读的内容。', 'bad');
+    return;
+  }
   ui.speakBtn.disabled = true;
-  ui.speakBtn.textContent = '试读中…';
+  ui.speakBtn.textContent = '朗读中…';
   setMessage('正在合成并朗读，第一次可能要等一会儿…', 'busy');
   try {
-    await postJson('probe');
-    setMessage('功能正常', 'ok');
+    const result = await postJson('speak', { text });
+    // 切了段时任务会在音频播完之前就完成，不能说「读完了」。
+    const playing = Number(result.segments) > 1;
+    setMessage(playing ? '已开始朗读，分段播放中。' : '读完了。', 'ok');
   } catch (error) {
-    setMessage(error instanceof Error ? error.message : '试读失败。', 'bad');
+    setMessage(error instanceof Error ? error.message : '朗读失败。', 'bad');
   } finally {
-    ui.speakBtn.disabled = false;
-    ui.speakBtn.textContent = '试读一句';
+    ui.speakBtn.disabled = tryTextValue().length === 0;
+    ui.speakBtn.textContent = '朗读这段文字';
   }
 });
 
@@ -260,4 +299,8 @@ window.addEventListener('focus', () => {
 await hana.ready();
 // 先把宿主主题设好，再读状态，免得页面先闪一下兜底色。
 followHostTheme();
+// 输入框先填默认测试语，再同步字数和按钮状态。
+ui.tryText.value = DEFAULT_TRY_TEXT;
+renderTryCount();
+ui.speakBtn.disabled = tryTextValue().length === 0;
 load();
