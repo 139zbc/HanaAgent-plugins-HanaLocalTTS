@@ -161,6 +161,13 @@
 | M14-3 | 服务启停搬家：`start/stop/watch` 全走 Node→助手 | 启动/停止正常；停后不留 `server.py` 进程；关掉 Hana 服务自己没 |
 | M14-4 | 自动下载 Python 3.12.14（`curl.exe` 下载 + `tar.exe` 解包）+ 设置页加一行「Python 运行环境」 | 强制走下载分支能装上并跑通 |
 
+**M14-4 结果**：代码已就位，等用户在 Hana 里验收。
+- 装哪一份：官方 3.12.11 之后只发源码没有 Windows 包（3.12.14 的 .exe 在 python.org 上是 404）；官方全量 zip 解压即用但**缺 `venvlauncher.exe`**，`python -m venv` 直接失败（实测）；官方 .exe 安装程序要静默安装、写注册表、可能要提权。改用 **python-build-standalone 3.12.16**（uv 用的同款独立构建）：解压即用，pip / venv / VC 运行时全自带，npmmirror 镜像实测 44.9MB、2.1 秒下完，解压 143MB。同属 3.12，torch 轮子通用。
+- 鸡生蛋问题：助手本身就是 Python 脚本，机器上一个 Python 都没有时它跑不起来，就没法用助手下载 Python。所以下载这一步分两条路：**有 Python**（绝大多数机器）走助手的 `python-install`（urllib 下载 + tarfile 解压 + 验版本，进度镜像到 `python-state.json`）；**一个 Python 都没有**时走系统自带的 `curl.exe`（PowerShell 的 `Invoke-WebRequest` 兵底）+ `tar.exe` 解压。
+- 设置页多一行「Python 运行环境」：状态（App 自带 3.12.16 / 系统里的 3.12.14 / 未下载）、下载按钮、来源选择（自动 / App 自带 / 系统里的）。来源存成 `kokoroPythonSource`（manifest 里已声明，不然宿主校验不过）。
+- 所有调助手的地方（状态、启停、守护、合成、安装）都走同一个来源设置：来源是「App 自带」而它还没装好时，错误直接说「先在上面「Python 运行环境」下载一个」。
+- 踩过的坑：① `curl.exe` 在受限环境里报 `SEC_E_NO_CREDENTIALS`（拿不到 Schannel 凭据），实测下不了文件；受限环境下只有 Python 的 urllib 能下载。所以下载必须有备用路。② `python -m venv` 在 Windows 上会拷 `venvlauncher.exe` / `venvwlauncher.exe`，官方 zip 里没有这两个文件，报「Unable to copy」——这就是官方 zip 不能用的原因。③ 独立构建的压缩包里 3388 个成员全是普通文件、顶层就是 `python/`，解压到 app-data 里正好落在 `app-data/python`，用 Python 的 `tarfile` 解压没有软链接权限问题。④ `python-state.json` 要用 UTF-8 写，不然页面上的中文会乱码。
+
 **M14-2 结果**：已通过。安装调度不再拼 PowerShell 脚本：
 - Node 把 `server.py` / `install.py` 放进自己的数据目录，Python 助手把它们搬进安装目录并后台启动 `install.py`（助手是子进程，不受 Node 权限模型限制）。
 - 安装进度由 `install.py` 镜像一份到 App 数据目录（`--state-dir`），Node 直接读文件，不用再起进程去读安装目录里的状态。
@@ -251,7 +258,7 @@
 - [x] M14-1 助手 + 运行时骨架，状态探测去掉 PowerShell
 - [x] M14-2 安装调度搬到 Node
 - [x] M14-3 服务启停搬到 Node（代码就位，待用户在 Hana 里验收）
-- [ ] M14-4 自动下载 Python 3.12.14
+- [ ] M14-4 自动下载 Python 3.12.16（代码就位，待用户在 Hana 里验收）
 - [x] M15-1 模型只取要用的文件（config + 权重 + 选中的那一个声音）
 - [x] M15-2 换声音按需补下那一个声音文件
 - [x] M15-3 换安装目录前先停服务；停止按钮不再消失

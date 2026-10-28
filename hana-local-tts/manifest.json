@@ -2,7 +2,7 @@
   "manifestVersion": 2,
   "id": "hana-local-tts",
   "name": "\u672c\u5730\u8bed\u97f3\u6717\u8bfb",
-  "version": "0.9.5",
+  "version": "0.9.7",
   "entry": "index.js",
   "capabilities": [
     "app/process.spawn",
@@ -71,6 +71,11 @@
             "type": "string",
             "title": "Kokoro 模型下载源",
             "default": "modelscope"
+          },
+          "kokoroPythonSource": {
+            "type": "string",
+            "title": "Python 来源",
+            "default": "auto"
           }
         }
       },

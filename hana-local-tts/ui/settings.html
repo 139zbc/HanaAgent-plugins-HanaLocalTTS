@@ -14,6 +14,26 @@
     <section class="group">
       <h2>本地 Kokoro</h2>
       <div class="card">
+        <div class="row">
+          <div class="text">
+            <span class="row-title">Python 运行环境</span>
+            <span class="row-desc" id="kokoro-python" data-state="loading">正在查看…</span>
+          </div>
+          <span class="actions">
+            <select id="python-source">
+              <option value="auto" selected>自动</option>
+              <option value="app">App 自带</option>
+              <option value="system">系统里的</option>
+            </select>
+            <button id="download-python" type="button" class="small" hidden>下载</button>
+          </span>
+        </div>
+        <div class="progress-wrap" id="progress-python" hidden>
+          <div class="progress-bar"><div class="progress-fill" id="fill-python"></div></div>
+          <p class="hint" id="message-python"></p>
+        </div>
+        <p class="row-error" id="error-python" role="alert" hidden></p>
+
         <div class="piece" data-component="model">
           <div class="row">
             <div class="text">
@@ -160,6 +180,6 @@
       </div>
     </section>
   </main>
-  <script type="module" src="./assets/settings.js?v=11"></script>
+  <script type="module" src="./assets/settings.js?v=13"></script>
 </body>
 </html>

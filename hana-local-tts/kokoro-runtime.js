@@ -12,7 +12,7 @@
 
 import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -21,8 +21,22 @@ import { HELPER_PY_B64, INSTALL_PY_B64, SERVER_PY_B64 } from "./kokoro-files.js"
 const execFileAsync = promisify(execFile);
 
 export const PYTHON_VERSION = "3.12.14";
-const DOWNLOADED_DIR = "python";
+export const DOWNLOADED_DIR = "python";
 const PY_LAUNCHER = "C:\\Windows\\py.exe";
+
+// App 自带的便携版 Python（python-build-standalone，uv 用的同款）。
+// 为什么不用官方安装包：3.12.11 之后官方只发源码没有 Windows 包；官方全量 zip
+// 又缺 venvlauncher.exe，建不了 venv（实测）。这个包解压即用，pip/venv/VC 运行时全自带。
+export const PORTABLE_PYTHON_VERSION = "3.12.16";
+const PORTABLE_PYTHON_BUILD = "20261026";
+const PORTABLE_PYTHON_ARCHIVE = `cpython-${PORTABLE_PYTHON_VERSION}+${PORTABLE_PYTHON_BUILD}-x86_64-pc-windows-msvc-install_only.tar.gz`;
+const PORTABLE_PYTHON_URLS = [
+  `https://registry.npmmirror.com/-/binary/python-build-standalone/${PORTABLE_PYTHON_BUILD}/${PORTABLE_PYTHON_ARCHIVE}`,
+  `https://github.com/astral-sh/python-build-standalone/releases/download/${PORTABLE_PYTHON_BUILD}/${PORTABLE_PYTHON_ARCHIVE}`,
+];
+// 压缩包约 45MB，用来算进度条。
+const PORTABLE_PYTHON_BYTES = 47100000;
+const PORTABLE_PYTHON_STATE = "python-state.json";
 
 // 宿主会清空子进程的环境变量，这里按需补齐，别让子进程依赖继承来的值。
 export function childEnv(dataDir) {
@@ -117,17 +131,24 @@ async function pyLauncher(sdk, dataDir) {
 //   2. C:\Windows\py.exe 按标签拉起机器上已有的 Python
 // 直接跑用户目录里的 python.exe 不行——那个路径 App 进程读不了。
 // require312 为真时只认 3.12（装依赖、跑服务要用）。
-export async function resolveInterpreter(sdk, dataDir, require312) {
+// source：auto（默认，先用自带的）、app（只用自带的）、system（只用系统的）。
+export async function resolveInterpreter(sdk, dataDir, require312, source = "auto") {
   const attempts = [];
-  const downloaded = path.join(dataDir, DOWNLOADED_DIR, "python.exe");
-  if (safeExists(downloaded)) {
-    const version = await pythonVersion(downloaded, [], dataDir);
-    if (!require312 || (version && version.major === 3 && version.minor === 12)) {
-      return { kind: "direct", command: downloaded, args: [], attempts };
+  if (source !== "system") {
+    const downloaded = path.join(dataDir, DOWNLOADED_DIR, "python.exe");
+    if (safeExists(downloaded)) {
+      const version = await pythonVersion(downloaded, [], dataDir);
+      if (!require312 || (version && version.major === 3 && version.minor === 12)) {
+        return { kind: "direct", command: downloaded, args: [], attempts };
+      }
+      attempts.push("app-data 里那份不是 3.12");
+    } else {
+      attempts.push("app-data 里没有 python");
     }
-    attempts.push("app-data 里那份不是 3.12");
-  } else {
-    attempts.push("app-data 里没有 python");
+  }
+  if (source === "app") {
+    attempts.push("按设置只用 App 自带的 Python");
+    return { kind: "none", attempts };
   }
 
   const { launcher, list } = await pyLauncher(sdk, dataDir);
@@ -183,7 +204,7 @@ async function pythonVersion(executable, prefixArgs, dataDir) {
 
 // 调助手的一个子命令，返回它打印的 JSON。
 export async function runHelper(sdk, dataDir, args, options = {}) {
-  const python = await resolveInterpreter(sdk, dataDir, false);
+  const python = await resolveInterpreter(sdk, dataDir, false, options.source || "auto");
   if (python.kind === "none") {
     throw new Error(`找不到能用的 Python（${python.attempts.join("；")}）。需要 3.8 以上，3.12 最稳。`);
   }
@@ -194,6 +215,196 @@ export async function runHelper(sdk, dataDir, args, options = {}) {
     options.timeoutMs || 30000,
   );
   return parseHelperOutput(stdout, stderr);
+}
+
+// 找真正会用的那个 Python：App 自带的那份，还是系统里的。
+export async function effectivePython(sdk, dataDir, source) {
+  const python = await resolveInterpreter(sdk, dataDir, false, source || "auto");
+  if (python.kind === "none") {
+    return { ok: false, reason: python.attempts.join("；") };
+  }
+  const version = await pythonVersion(python.command, python.args, dataDir);
+  return {
+    ok: true,
+    kind: python.kind,
+    version: version ? version.text : "",
+    path: python.command,
+  };
+}
+
+// ---- App 自带的 Python ----
+
+function pythonStatePath(dataDir) {
+  return path.join(dataDir, PORTABLE_PYTHON_STATE);
+}
+
+export async function readPythonState(dataDir) {
+  try {
+    const parsed = JSON.parse(await readFile(pythonStatePath(dataDir), "utf8"));
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+async function writePythonState(dataDir, patch) {
+  const next = { ...(await readPythonState(dataDir)), ...patch, updatedAt: Date.now() };
+  try {
+    await writeFile(pythonStatePath(dataDir), JSON.stringify(next), "utf8");
+  } catch {
+    // 状态写不进去也不影响下载本身。
+  }
+  return next;
+}
+
+// app-data 里那份 Python 的状态。这一步不用助手：机器上可能一个 Python 都没有，
+// 助手（Python 脚本）跑不起来，状态还是得能显示。
+export async function portablePythonState(sdk, dataDir) {
+  const exe = path.join(dataDir, DOWNLOADED_DIR, "python.exe");
+  const state = await readPythonState(dataDir);
+  if (!safeExists(exe)) {
+    return { ready: false, version: "", path: "", downloading: state.phase === "downloading", state };
+  }
+  const version = await pythonVersion(exe, [], dataDir);
+  const ok = !!version && version.major === 3 && version.minor === 12;
+  return {
+    ready: ok,
+    version: version ? version.text : "",
+    path: ok ? exe : "",
+    downloading: state.phase === "downloading",
+    state,
+  };
+}
+
+// 下载里的进度：看压缩包长了多少。
+export async function pythonDownloadProgress(dataDir) {
+  const state = await readPythonState(dataDir);
+  if (state.phase !== "downloading") return { ...state, percent: state.percent || 0 };
+  // 助手会报真进度；有就用它的，没有再拿压缩包大小估。
+  if (typeof state.percent === "number" && state.percent > 0) return state;
+  let bytes = 0;
+  try {
+    bytes = (await stat(path.join(dataDir, "tmp", "python.tar.gz"))).size;
+  } catch {
+    bytes = 0;
+  }
+  const total = state.total || PORTABLE_PYTHON_BYTES;
+  return { ...state, bytes, percent: Math.min(99, Math.round((bytes * 100) / total)) };
+}
+
+// 下载并装好 App 自带的 Python。
+// 这一步不能交给助手：助手本身就是 Python 脚本，机器上一个 Python 都没有时它跑不起来。
+// 所以用系统自带的工具：curl.exe 下载（PowerShell 兵底），tar.exe 解压。
+export async function startPythonDownload(sdk, dataDir) {
+  const existing = await portablePythonState(sdk, dataDir);
+  if (existing.ready) return { started: false, reason: "已经有了", version: existing.version };
+  const state = await readPythonState(dataDir);
+  if (state.phase === "downloading" || state.phase === "extracting") return { started: true, resumed: true };
+  const tmp = path.join(dataDir, "tmp");
+  await mkdir(tmp, { recursive: true });
+  const archive = path.join(tmp, "python.tar.gz");
+  await rm(archive, { force: true }).catch(() => {});
+  await writePythonState(dataDir, {
+    phase: "downloading",
+    percent: 0,
+    bytes: 0,
+    total: PORTABLE_PYTHON_BYTES,
+    message: `正在下载 Python ${PORTABLE_PYTHON_VERSION}…`,
+    error: "",
+  });
+  // 有 Python 就让助手下（它的 urllib 稳），后台跑，不占着这次请求。
+  const python = await resolveInterpreter(sdk, dataDir, false, "auto");
+  if (python.kind !== "none") {
+    await spawnDetached(sdk, dataDir, [
+      "python-install",
+      "--dir", path.join(dataDir, DOWNLOADED_DIR),
+      "--state-dir", dataDir,
+    ]);
+    return { started: true, via: "helper" };
+  }
+  // 一个 Python 都没有：助手跑不起来，只能用系统自带的 curl.exe。
+  runPythonDownload(sdk, dataDir, archive);
+  return { started: true, via: "curl" };
+}
+
+async function runPythonDownload(sdk, dataDir, archive) {
+  const curl = await resolveCommand(sdk, ["curl.exe", "curl"]);
+  const shell = await resolveCommand(sdk, ["powershell.exe", "powershell"]);
+  for (const url of PORTABLE_PYTHON_URLS) {
+    await writePythonState(dataDir, { phase: "downloading", percent: 0, message: "正在下载 Python…" });
+    let ok = false;
+    if (curl) ok = await downloadWithCurl(sdk, dataDir, curl, url, archive);
+    if (!ok && shell) ok = await downloadWithPowerShell(sdk, dataDir, shell, url, archive);
+    if (ok) {
+      await finishPythonInstall(sdk, dataDir, archive);
+      return;
+    }
+    await writePythonState(dataDir, { phase: "retrying", percent: 0, message: "这个源没成，换一个…" });
+  }
+  await writePythonState(dataDir, { phase: "failed", percent: 0, message: "Python 没下成，两个源都不通。" });
+}
+
+// curl.exe 下载。失败返回 false，换下一个办法。
+function downloadWithCurl(sdk, dataDir, curl, url, archive) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(
+        curl,
+        ["-L", "--fail", "--retry", "2", "--connect-timeout", "20", "-o", archive, url],
+        { cwd: dataDir, env: childEnv(dataDir), windowsHide: true, stdio: ["ignore", "ignore", "pipe"] },
+      );
+    } catch (error) {
+      resolve(false);
+      return;
+    }
+    child.on("error", () => resolve(false));
+    child.on("exit", (code) => resolve(code === 0));
+  });
+}
+
+// PowerShell 的 Invoke-WebRequest 兵底。有些环境里 curl 的 TLS 凭据拿不到。
+async function downloadWithPowerShell(sdk, dataDir, shell, url, archive) {
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    "$ProgressPreference = 'SilentlyContinue'",
+    `Invoke-WebRequest -Uri '${url.replace(/'/g, "''")}' -OutFile '${archive.replace(/'/g, "''")}' -UseBasicParsing -TimeoutSec 1800`,
+  ].join("\n");
+  try {
+    await runCommand(shell, ["-NoProfile", "-NonInteractive", "-Command", script], dataDir, 1800000);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function finishPythonInstall(sdk, dataDir, archive) {
+  await writePythonState(dataDir, { phase: "extracting", percent: 95, message: "正在解压…" });
+  const tar = await resolveCommand(sdk, ["tar.exe", "tar"]);
+  if (!tar) {
+    await writePythonState(dataDir, { phase: "failed", percent: 0, message: "找不到 Windows 自带的 tar.exe，解不开压缩包。" });
+    return;
+  }
+  try {
+    // 压缩包顶层就是 python/，解压到 app-data 里正好落在 app-data/python。
+    await runCommand(tar, ["-xzf", archive, "-C", dataDir], dataDir, 300000);
+  } catch (error) {
+    await writePythonState(dataDir, { phase: "failed", percent: 0, message: `解压失败：${String((error && error.message) || error)}` });
+    return;
+  }
+  const exe = path.join(dataDir, DOWNLOADED_DIR, "python.exe");
+  const version = safeExists(exe) ? await pythonVersion(exe, [], dataDir) : null;
+  if (!version || version.major !== 3 || version.minor !== 12) {
+    await writePythonState(dataDir, { phase: "failed", percent: 0, message: "解压出来的 Python 版本不对。" });
+    return;
+  }
+  await rm(archive, { force: true }).catch(() => {});
+  await writePythonState(dataDir, {
+    phase: "done",
+    percent: 100,
+    version: version.text,
+    message: `Python ${version.text} 已经装好。`,
+  });
 }
 
 // 把 server.py / install.py 放进 App 数据目录，助手会搬到安装目录再跑。
@@ -214,9 +425,14 @@ export async function writeAppSources(dataDir) {
 // 发起一次安装：Node 只把文件放进自己的数据目录并叫助手去跑。
 export async function startInstall(sdk, dataDir, options) {
   await writeAppSources(dataDir);
-  const python = await resolveInterpreter(sdk, dataDir, true);
+  // options.source 是模型下载源，Python 来源是另一个字段，别搞混。
+  const python = await resolveInterpreter(sdk, dataDir, true, options.pythonSource || "auto");
   if (python.kind === "none") {
-    throw new Error(`找不到 Python 3.12（${python.attempts.join("；")}）。装依赖和跑服务都要 3.12。`);
+    throw new Error(
+      options.pythonSource === "app"
+        ? "App 自带的 Python 还没装好，先在上面「Python 运行环境」下载一个。"
+        : `找不到 Python 3.12（${python.attempts.join("；")}）。装依赖和跑服务都要 3.12。`,
+    );
   }
   const args = [
     ...python.args,

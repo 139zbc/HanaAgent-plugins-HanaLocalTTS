@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { defineApp } from "./sdk/app-contract/server-client.js";
 import { KOKORO_VOICES } from "./kokoro-voices.js";
-import { runHelper, spawnDetached, startInstall, writeAppSources } from "./kokoro-runtime.js";
+import { runHelper, spawnDetached, startInstall, writeAppSources, portablePythonState, pythonDownloadProgress, startPythonDownload, effectivePython } from "./kokoro-runtime.js";
 
 export const name = "hana-local-tts";
 
@@ -210,8 +210,14 @@ function defaultKokoroRoot() {
 async function kokoroStatus(sdk) {
   const root = await kokoroRoot(sdk);
   const result = { installed: false, modelReady: false, cpuReady: false, gpuReady: false, dirGB: null, running: false, foreign: false, device: "", serviceRoot: "", path: root, defaultPath: defaultKokoroRoot(), autoStop: await autoStopEnabled(sdk), targetDevice: await kokoroDevice(sdk), probeFailed: false, probeError: "" };
+  // Python 那一行不用助手：机器上可能一个 Python 都没有，助手跑不起来。
+  const portable = await portablePythonState(sdk, sdk.dataDir);
+  result.pythonReady = portable.ready === true;
+  result.pythonVersion = portable.version || "";
+  result.pythonSource = await pythonSource(sdk);
+  result.pythonDownloading = portable.downloading === true;
   try {
-    const parsed = await runHelper(sdk, sdk.dataDir, ["probe", "--root", root], { timeoutMs: 30000 });
+    const parsed = await runKokoroHelper(sdk, ["probe", "--root", root], { timeoutMs: 30000 });
     result.modelReady = parsed.model === true;
     result.cpuReady = parsed.cpu === true;
     result.gpuReady = parsed.gpu === true;
@@ -227,14 +233,18 @@ async function kokoroStatus(sdk) {
     await sdk.logger.error(`kokoro status check failed: ${errorDetail(error)}`);
   }
   result.installed = result.modelReady && (result.targetDevice === "cuda" ? result.gpuReady : result.cpuReady);
-  await sdk.logger.info(`kokoro status: model=${result.modelReady} cpu=${result.cpuReady} gpu=${result.gpuReady} installed=${result.installed} running=${result.running} device=${result.device || "-"}`);
+  if (result.probeFailed && !result.pythonReady) {
+    // 一个 Python 都没有时，助手跑不了是正常的：先装 Python。
+    result.probeError = "这台电脑还没有能用的 Python 3.12，先装一个。";
+  }
+  await sdk.logger.info(`kokoro status: model=${result.modelReady} cpu=${result.cpuReady} gpu=${result.gpuReady} installed=${result.installed} running=${result.running} device=${result.device || "-"} python=${result.pythonVersion || "-"}`);
   return result;
 }
 
 // 只在用户点 GPU「下载」时查显卡。不在打开设置时查，避免 nvidia-smi 弹出命令行窗口。
 async function checkGpuHardware(sdk) {
   try {
-    const result = await runHelper(sdk, sdk.dataDir, ["gpu"], { timeoutMs: 45000 });
+    const result = await runKokoroHelper(sdk, ["gpu"], { timeoutMs: 45000 });
     if (result && result.gpu === true) return { ok: true };
     return { ok: false, error: "这台电脑没有 NVIDIA 显卡。" };
   } catch (error) {
@@ -345,7 +355,7 @@ async function ensureVoiceFile(sdk, root, voice) {
   const source = await kokoroVoiceSource(sdk);
   const args = ["voice", "--root", root, "--id", voice];
   if (source) args.push("--source", source);
-  await runHelper(sdk, sdk.dataDir, args, { timeoutMs: 120000 });
+  await runKokoroHelper(sdk, args, { timeoutMs: 120000 });
   readyVoices.add(voice);
   await sdk.logger.info(`kokoro voice ready: ${voice}`);
 }
@@ -361,9 +371,8 @@ async function writeSpeechFile(sdk, text, voice, rate, wavFile, engine, play = t
       await ensureVoiceFile(sdk, root, kokoroVoice);
       try {
         // 合成交给助手：它会保证服务在跑，再请求本机服务出声。
-        await runHelper(
+        await runKokoroHelper(
           sdk,
-          sdk.dataDir,
           [
             "speak",
             "--root", root,
@@ -730,7 +739,7 @@ async function startKokoroInstall(sdk, root, source, pipSource, torchSource, com
   try {
     // Node 读不到用户选的安装目录，所以只把两份脚本放进 App 自己的数据目录，
     // 再让 Python 助手搬过去并启动（助手是子进程，不受 Node 权限模型限制）。
-    const result = await startInstall(sdk, workDir, { root, component, source, pipSource, torchSource, voice });
+    const result = await startInstall(sdk, workDir, { root, component, source, pipSource, torchSource, voice, pythonSource: await pythonSource(sdk) });
     await sdk.logger.info(`kokoro install started root=${root} source=${source} component=${component} python=${result && result.python ? result.python : "-"}`);
     return { ok: true };
   } catch (error) {
@@ -755,7 +764,7 @@ function watcherPidPath(sdk) {
 // 找 Hana 桌面端的进程号（守护要盯着它）。
 async function findHanaPid(sdk) {
   try {
-    const result = await runHelper(sdk, sdk.dataDir, ["hana-pid"], { timeoutMs: 20000 });
+    const result = await runKokoroHelper(sdk, ["hana-pid"], { timeoutMs: 20000 });
     const pid = result && Number(result.pid);
     return Number.isFinite(pid) && pid > 0 ? pid : 0;
   } catch {
@@ -807,12 +816,29 @@ async function kokoroDevice(sdk) {
   }
 }
 
+// Python 来源：auto（默认，先用 App 自带的）、app（只用 App 自带的）、system（只用系统的）。
+async function pythonSource(sdk) {
+  try {
+    const all = await sdk.config.getAll();
+    const value = all?.kokoroPythonSource;
+    return value === "app" || value === "system" ? value : "auto";
+  } catch {
+    return "auto";
+  }
+}
+
+// 所有调助手的地方都走这里，Python 来源设置才能统一生效。
+async function runKokoroHelper(sdk, args, options = {}) {
+  const source = await pythonSource(sdk);
+  return runHelper(sdk, sdk.dataDir, args, { ...options, source });
+}
+
 async function cleanupOrphanKokoro(sdk) {
   const marker = await readSessionMarker(sdk);
   if (!marker.hanaPid) return false;
   // 标记里的 Hana 进程还活着 → 不是遗留，不动
   try {
-    const result = await runHelper(sdk, sdk.dataDir, ["alive", "--pid", String(marker.hanaPid)], { timeoutMs: 15000 });
+    const result = await runKokoroHelper(sdk, ["alive", "--pid", String(marker.hanaPid)], { timeoutMs: 15000 });
     if (result && result.alive === true) return false;
   } catch {
     return false;
@@ -831,7 +857,7 @@ async function startKokoroService(sdk) {
   const root = await kokoroRoot(sdk);
   const device = await kokoroDevice(sdk);
   await syncServerCode(sdk, root);
-  const result = await runHelper(sdk, sdk.dataDir, ["start", "--root", root, "--device", device], { timeoutMs: 200000 });
+  const result = await runKokoroHelper(sdk, ["start", "--root", root, "--device", device], { timeoutMs: 200000 });
   if (!result || result.running !== true) throw new Error("启动没有成功。");
   await ensureWatcher(sdk);
   return { ok: true };
@@ -841,7 +867,7 @@ async function startKokoroService(sdk) {
 async function syncServerCode(sdk, root) {
   try {
     await writeAppSources(sdk.dataDir);
-    await runHelper(sdk, sdk.dataDir, ["sync", "--root", root, "--app-dir", sdk.dataDir], { timeoutMs: 20000 });
+    await runKokoroHelper(sdk, ["sync", "--root", root, "--app-dir", sdk.dataDir], { timeoutMs: 20000 });
   } catch (error) {
     await sdk.logger.error(`kokoro source sync failed: ${failureText(error)}`);
   }
@@ -851,7 +877,7 @@ async function spawnKokoroService(sdk) {
   const root = await kokoroRoot(sdk);
   const device = await kokoroDevice(sdk);
   await syncServerCode(sdk, root);
-  const result = await runHelper(sdk, sdk.dataDir, ["start", "--root", root, "--device", device, "--wait", "0"], { timeoutMs: 30000 });
+  const result = await runKokoroHelper(sdk, ["start", "--root", root, "--device", device, "--wait", "0"], { timeoutMs: 30000 });
   if (!result || result.started !== true) throw new Error("启动没有成功。");
   await ensureWatcher(sdk);
   return { ok: true };
@@ -859,7 +885,7 @@ async function spawnKokoroService(sdk) {
 
 async function readKokoroLive(sdk) {
   try {
-    const result = await runHelper(sdk, sdk.dataDir, ["live"], { timeoutMs: 10000 });
+    const result = await runKokoroHelper(sdk, ["live"], { timeoutMs: 10000 });
     return { running: result && result.running === true, device: result && typeof result.device === "string" ? result.device : "" };
   } catch {
     return { running: false, device: "" };
@@ -869,7 +895,7 @@ async function readKokoroLive(sdk) {
 async function stopKokoroService(sdk, rootOverride) {
   // rootOverride：服务在别的目录跑的时候（比如换过安装路径），按它自己的目录找进程。
   const root = rootOverride || (await kokoroRoot(sdk));
-  const result = await runHelper(sdk, sdk.dataDir, ["stop", "--root", root], { timeoutMs: 30000 });
+  const result = await runKokoroHelper(sdk, ["stop", "--root", root], { timeoutMs: 30000 });
   const stopped = result && Array.isArray(result.stopped) ? result.stopped : [];
   await sdk.logger.info(`kokoro stopped: ${stopped.join(",") || "none"}`);
   return { ok: true, stopped };
@@ -882,7 +908,7 @@ async function stopWatcher(sdk) {
   // 旧版本留下的 PowerShell 守护脚本没用了，清掉。
   await rm(path.join(sdk.dataDir, "kokoro-watch.ps1"), { force: true }).catch(() => {});
   try {
-    await runHelper(sdk, sdk.dataDir, ["watch-stop", "--pid-file", watcherPidPath(sdk)], { timeoutMs: 20000 });
+    await runKokoroHelper(sdk, ["watch-stop", "--pid-file", watcherPidPath(sdk)], { timeoutMs: 20000 });
   } catch (error) {
     await sdk.logger.error(`kokoro watcher stop failed: ${failureText(error)}`);
   }
@@ -966,6 +992,61 @@ export default defineApp(async (sdk) => {
         const root = await kokoroRoot(sdk);
         const state = await readInstallState(sdk, root);
         return c.json(state);
+      } catch (error) {
+        return c.json({ error: failureText(error) }, 500);
+      }
+    });
+
+    // Python 运行环境：下载 App 自带的那份，或者切换用哪一份。
+    app.get("/kokoro-python", async (c) => {
+      try {
+        const portable = await portablePythonState(sdk, sdk.dataDir);
+        const progress = await pythonDownloadProgress(sdk.dataDir);
+        const source = await pythonSource(sdk);
+        const effective = await effectivePython(sdk, sdk.dataDir, source);
+        return c.json({
+          ok: true,
+          ready: portable.ready,
+          version: portable.version,
+          source,
+          effective,
+          downloading: portable.downloading,
+          percent: progress.percent || 0,
+          bytes: progress.bytes || 0,
+          total: progress.total || 0,
+          message: progress.message || "",
+          phase: progress.phase || "none",
+        });
+      } catch (error) {
+        return c.json({ error: failureText(error) }, 500);
+      }
+    });
+
+    app.post("/kokoro-python", async (c) => {
+      try {
+        const result = await startPythonDownload(sdk, sdk.dataDir);
+        return c.json({ ok: true, ...result });
+      } catch (error) {
+        await sdk.logger.error(`kokoro python download failed: ${failureText(error)}`);
+        return c.json({ ok: false, error: failureText(error, "Python 没下成") }, 500);
+      }
+    });
+
+    app.put("/kokoro-python", async (c) => {
+      let body;
+      try {
+        body = await c.req.json();
+      } catch {
+        return c.json({ error: "请求不是 JSON。" }, 400);
+      }
+      const value = body && body.source;
+      if (!["auto", "app", "system"].includes(value)) {
+        return c.json({ error: "来源只能是自动、App 自带或系统。" }, 400);
+      }
+      try {
+        await sdk.config.setMany({ kokoroPythonSource: value });
+        await sdk.logger.info(`kokoro python source set to ${value}`);
+        return c.json({ ok: true, source: value });
       } catch (error) {
         return c.json({ error: failureText(error) }, 500);
       }

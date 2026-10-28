@@ -15,13 +15,15 @@
 
 服务启停已经搬到 Python 助手：Node 只管调度，拉服务、停服务、守着 Hana 退出自动停服务，全由助手（子进程）做。系统语音合成和播放仍走 PowerShell（Node 没有 .NET/SAPI）。
 
+机器上没有 Python 也能装：App 会自己下一个便携版 Python（3.12.16，和 uv 用的同款构建）到 app-data，装模型、建环境都用它。设置页多一行「Python 运行环境」，可以选用哪一份。
+
 本地模型装在 `D:\ProgramData\OH-WorkSpace\hanako\kokoro-zh`，不在这个 Git 仓库里。服务脚本的存档副本是 [kokoro/server.py](kokoro/server.py)。正在跑的那份在模型目录里，改脚本时两份要一起改。
 
 完整计划见 [PLAN.md](PLAN.md)。
 
 改完插件后，把 `hana-local-tts` 复制到 `C:\Users\Fantasy\.hanako\apps\hana-local-tts`，Hana 里打开的才是这份。
 
-下一步：重新加载这个 App，确认「启动 / 停止」按钮正常、停完不留 `server.py` 进程、关掉 Hana 后服务自己停。然后做 M14-4——首装自动下载 Python 3.12.14 到 app-data（`curl.exe` 下载 + `tar.exe` 解包），设置页加一行「Python 运行环境」。
+下一步：重新加载这个 App，确认「启动 / 停止」按钮正常、停完不留 `server.py` 进程、关掉 Hana 后服务自己停；再试一下新加的「Python 运行环境」那一行（下载 App 自带的 Python，切到「App 自带」后装模型和 CPU 环境）。之后做 M14-3 的收尾（面板也看一眼）。
 
 ## 开发约定
 

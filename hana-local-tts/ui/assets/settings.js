@@ -29,7 +29,7 @@ let openSelect = null;
 
 function dressSelect(select) {
   const root = document.createElement("div");
-  root.className = "tts-select" + (select.id === "device-select" ? " is-short" : "");
+  root.className = "tts-select" + (select.id === "device-select" || select.id === "python-source" ? " is-short" : "");
   select.parentNode.insertBefore(root, select);
   root.appendChild(select);
   select.classList.add("tts-select-native");
@@ -144,10 +144,13 @@ const stopBtn = document.getElementById("kokoro-stop");
 const autostopRow = document.getElementById("autostop-row");
 const autostopToggle = document.getElementById("autostop-toggle");
 const deviceSelect = document.getElementById("device-select");
+const pythonSource = document.getElementById("python-source");
+const downloadPython = document.getElementById("download-python");
 const sourceDress = dressSelect(installSource);
 const pipDress = dressSelect(pipSource);
 const torchDress = dressSelect(torchSource);
 const deviceDress = dressSelect(deviceSelect);
+const pythonDress = dressSelect(pythonSource);
 const downloadModel = document.getElementById("download-model");
 const downloadCpu = document.getElementById("download-cpu");
 const downloadGpu = document.getElementById("download-gpu");
@@ -158,8 +161,14 @@ const errorSlots = {
   gpu: document.getElementById("error-gpu"),
   run: document.getElementById("error-run"),
   path: document.getElementById("error-path"),
+  python: document.getElementById("error-python"),
 };
 const progressUi = {
+  python: {
+    wrap: document.getElementById("progress-python"),
+    fill: document.getElementById("fill-python"),
+    message: document.getElementById("message-python"),
+  },
   model: {
     wrap: document.getElementById("progress-model"),
     fill: document.getElementById("fill-model"),
@@ -249,11 +258,108 @@ function setBusy(busy) {
   installSource.disabled = busy;
   pipSource.disabled = busy;
   torchSource.disabled = busy;
+  pythonSource.disabled = busy;
   sourceDress.sync();
   pipDress.sync();
   torchDress.sync();
   deviceDress.sync();
+  pythonDress.sync();
 }
+
+// ---- Python 运行环境 ----
+
+let pythonPollTimer = null;
+
+function showPythonProgress(percent, message) {
+  const ui = progressUi.python;
+  ui.wrap.hidden = false;
+  if (typeof percent === "number") ui.fill.style.width = `${percent}%`;
+  ui.message.textContent = message || "";
+}
+
+function hidePythonProgress() {
+  progressUi.python.wrap.hidden = true;
+}
+
+function ensurePythonPolling() {
+  if (pythonPollTimer) return;
+  pythonPollTimer = setInterval(refreshPython, 1000);
+}
+
+function stopPythonPolling() {
+  if (pythonPollTimer) { clearInterval(pythonPollTimer); pythonPollTimer = null; }
+}
+
+async function refreshPython() {
+  try {
+    const response = await hana.api.fetch("kokoro-python");
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok || body.error) throw new Error(body.error || "读不到 Python 状态。");
+    pythonSource.value = body.source || "auto";
+    const phase = body.phase || "none";
+    const busy = phase === "downloading" || phase === "extracting" || phase === "retrying";
+    if (busy) {
+      setRow("kokoro-python", "loading", body.message || "正在下载…");
+      showPythonProgress(body.percent || 0, body.message || "");
+      ensurePythonPolling();
+    } else if (phase === "failed") {
+      setRow("kokoro-python", "bad", "下载失败");
+      hidePythonProgress();
+      showError(body.message || "Python 没下成。", "python");
+      stopPythonPolling();
+    } else {
+      // 装好了（或本来就有）：那一行显示实际会用的那份，进度条收掉。
+      const effective = body.effective || {};
+      if (effective.ok) {
+        const where = effective.kind === "direct" ? "App 自带" : "系统里的";
+        setRow("kokoro-python", "ok", `${where} ${effective.version || "Python"}`);
+      } else {
+        setRow("kokoro-python", "bad", "没有可用的 Python");
+      }
+      hidePythonProgress();
+      stopPythonPolling();
+      if (phase === "done") showError("", "python");
+    }
+    downloadPython.hidden = body.ready === true || busy;
+    return body;
+  } catch (error) {
+    setRow("kokoro-python", "bad", "读不到状态");
+    return null;
+  }
+}
+
+downloadPython.addEventListener("click", async () => {
+  downloadPython.disabled = true;
+  setRow("kokoro-python", "loading", "正在下载…");
+  try {
+    const response = await hana.api.fetch("kokoro-python", { method: "POST" });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok || !body.ok) throw new Error(body.error || "下载没启动。");
+    showPythonProgress(0, "下载已启动…");
+    ensurePythonPolling();
+  } catch (error) {
+    showError(error instanceof Error ? error.message : "下载没启动。", "python");
+    setRow("kokoro-python", "bad", "下载失败");
+  } finally {
+    downloadPython.disabled = false;
+  }
+});
+
+pythonSource.addEventListener("change", async () => {
+  try {
+    const response = await hana.api.fetch("kokoro-python", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source: pythonSource.value }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok || !body.ok) throw new Error(body.error || "没有保存。");
+    showError("", "python");
+  } catch (error) {
+    showError(error instanceof Error ? error.message : "没有保存。", "python");
+  }
+  await refreshPython();
+});
 
 async function startInstall(component) {
   setBusy(true);
@@ -442,6 +548,7 @@ async function loadKokoroStatus() {
   setRow("kokoro-gpu", "loading", "正在查看…");
   setRow("kokoro-running", "loading", "正在查看…");
   setRow("kokoro-device", "loading", "正在查看…");
+  setRow("kokoro-python", "loading", "正在查看…");
   document.getElementById("kokoro-path").textContent = "—";
   try {
     const response = await hana.api.fetch("kokoro-status");
@@ -506,6 +613,8 @@ async function loadKokoroStatus() {
     pipDress.sync();
     torchDress.sync();
     deviceDress.sync();
+    pythonDress.sync();
+    await refreshPython();
   } catch (error) {
     setRow("kokoro-model", "bad", "读不到状态");
     setRow("kokoro-cpu", "bad", "读不到状态");

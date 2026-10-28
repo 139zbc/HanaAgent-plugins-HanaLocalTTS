@@ -31,6 +31,17 @@ VOICE_SOURCES = (
 # 一个真的声音包约 523KB；小到这个数以下肯定是错误页/空文件。
 MIN_VOICE_BYTES = 100_000
 
+# App 自带的便携版 Python（python-build-standalone，uv 用的同款）。
+# 官方 3.12.11 之后只发源码没有 Windows 包；官方全量 zip 缺 venvlauncher.exe 建不了 venv。
+PYTHON_VERSION = "3.12.16"
+PYTHON_BUILD = "20261026"
+PYTHON_ARCHIVE = "cpython-%s+%s-x86_64-pc-windows-msvc-install_only.tar.gz" % (PYTHON_VERSION, PYTHON_BUILD)
+PYTHON_URLS = (
+    "https://registry.npmmirror.com/-/binary/python-build-standalone/%s/%s" % (PYTHON_BUILD, PYTHON_ARCHIVE),
+    "https://github.com/astral-sh/python-build-standalone/releases/download/%s/%s" % (PYTHON_BUILD, PYTHON_ARCHIVE),
+)
+PYTHON_BYTES = 47100000
+
 
 def emit(payload):
     sys.stdout.write(json.dumps(payload) + "\n")
@@ -149,6 +160,123 @@ def parse_args(argv):
             rest.append(item)
         index += 1
     return parsed, rest
+
+
+def cmd_python_install(argv):
+    """把便携版 Python 装到 --dir 指定的目录（下载 + 解压 + 验版本）。
+
+    进度写到 <state-dir>/python-state.json，App 那边轮询这个文件。
+    """
+    args, rest = parse_args(argv)
+    target = os.path.abspath(args.get("dir") or "")
+    state_dir = os.path.abspath(args.get("state-dir") or os.path.dirname(target))
+    if not target:
+        fail("要指定 Python 装到哪。")
+    emit(install_python(target, state_dir))
+
+
+def write_python_state(state_dir, payload):
+    try:
+        os.makedirs(state_dir, exist_ok=True)
+        with open(os.path.join(state_dir, "python-state.json"), "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False)
+    except OSError:
+        pass
+
+
+def python_version_of(executable):
+    try:
+        result = subprocess.run(
+            [executable, "-c", "import sys;print('%d.%d.%d' % sys.version_info[:3])"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except Exception:
+        return ""
+    lines = (result.stdout or "").strip().splitlines()
+    return lines[-1].strip() if lines else ""
+
+
+def install_python(target_dir, state_dir):
+    """下载并解压便携版 Python。解压后是 target_dir/python.exe。"""
+    exe = os.path.join(target_dir, "python.exe")
+    if os.path.isfile(exe):
+        version = python_version_of(exe)
+        if version.startswith("3.12"):
+            write_python_state(state_dir, {
+                "phase": "done", "percent": 100, "version": version,
+                "message": "已经有 %s 了。" % version,
+            })
+            return {"installed": True, "version": version, "path": exe, "downloaded": False}
+    os.makedirs(target_dir, exist_ok=True)
+    tmp_dir = os.path.join(state_dir, "tmp")
+    os.makedirs(tmp_dir, exist_ok=True)
+    archive = os.path.join(tmp_dir, "python.tar.gz")
+    errors = []
+    ok = False
+    for url in PYTHON_URLS:
+        write_python_state(state_dir, {
+            "phase": "downloading", "percent": 0, "message": "正在下载 Python %s…" % PYTHON_VERSION,
+        })
+        try:
+            request = urllib.request.Request(url, headers={"User-Agent": "hana-local-tts/1.0"})
+            with urllib.request.urlopen(request, timeout=180) as response:
+                total = int(response.headers.get("Content-Length") or 0)
+                done = 0
+                started = time.monotonic()
+                last = 0.0
+                with open(archive, "wb") as handle:
+                    while True:
+                        chunk = response.read(262144)
+                        if not chunk:
+                            break
+                        handle.write(chunk)
+                        done += len(chunk)
+                        now = time.monotonic()
+                        if now - last >= 0.3:
+                            last = now
+                            speed = done / max(now - started, 0.001)
+                            percent = int(done * 100 / total) if total else 0
+                            write_python_state(state_dir, {
+                                "phase": "downloading",
+                                "percent": percent,
+                                "bytes": done,
+                                "total": total or PYTHON_BYTES,
+                                "speed": speed,
+                                "message": "已下 %.1f / %.1f MB · %.1f MB/秒" % (
+                                    done / 1048576, max(total, done) / 1048576, speed / 1048576),
+                            })
+            ok = True
+            break
+        except Exception as error:  # noqa: BLE001 - 换下一个源再试
+            errors.append("%s：%s" % (url.split("/")[2], error))
+    if not ok:
+        message = "Python 没下成。" + "；".join(errors)
+        write_python_state(state_dir, {"phase": "failed", "percent": 0, "message": message})
+        fail(message)
+    write_python_state(state_dir, {"phase": "extracting", "percent": 95, "message": "正在解压…"})
+    try:
+        import tarfile
+        with tarfile.open(archive, "r:gz") as tar:
+            # 压缩包顶层就是 python/，解压到 app-data 里正好落在 app-data/python。
+            tar.extractall(os.path.dirname(target_dir), filter="data")
+    except Exception as error:  # noqa: BLE001
+        message = "解压失败：%s" % error
+        write_python_state(state_dir, {"phase": "failed", "percent": 0, "message": message})
+        fail(message)
+    try:
+        os.remove(archive)
+    except OSError:
+        pass
+    version = python_version_of(exe)
+    if not version.startswith("3.12"):
+        message = "解压出来的 Python 版本不对：%s" % (version or "读不到版本")
+        write_python_state(state_dir, {"phase": "failed", "percent": 0, "message": message})
+        fail(message)
+    write_python_state(state_dir, {
+        "phase": "done", "percent": 100, "version": version,
+        "message": "Python %s 已经装好。" % version,
+    })
+    return {"installed": True, "version": version, "path": exe, "downloaded": True}
 
 
 def cmd_probe(argv):
@@ -757,6 +885,7 @@ COMMANDS = {
     "probe": cmd_probe,
     "install": cmd_install,
     "sync": cmd_sync,
+    "python-install": cmd_python_install,
     "gpu": cmd_gpu,
     "voice": cmd_voice,
     "start": cmd_start,
