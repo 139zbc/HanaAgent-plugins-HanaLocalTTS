@@ -10,7 +10,7 @@
 // 注意：Node 的权限模型对 fs 是「拒绝就抛异常」，不是「返回 false」。所有碰用户目录
 // 的检查都必须包 try/catch，否则整个流程会被一个 existsSync 弄死。
 
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -234,6 +234,27 @@ export async function startInstall(sdk, dataDir, options) {
   if (options.component === "model" && options.voice) args.push("--voice", options.voice);
   const { stdout, stderr } = await runCommand(python.command, args, dataDir, 60000);
   return parseHelperOutput(stdout, stderr);
+}
+
+// 起一个后台常驻的助手进程（守护用）：脱离 App 生命周期，App 退出后它还活着。
+//
+// 不要用 detached: true。Windows 上 DETACHED_PROCESS 会给子进程单开一个控制台
+// （CREATE_NO_WINDOW 会被忽略），就会闪一个黑窗口。实测：detached 拉起来的进程
+// GetConsoleWindow() 不为 0；只用 windowsHide 才是 0（压根没控制台）。
+// 普通 spawn 的子进程照样能活过父进程退出，够用。
+export async function spawnDetached(sdk, dataDir, args) {
+  const python = await resolveInterpreter(sdk, dataDir, false);
+  if (python.kind === "none") {
+    throw new Error(`找不到能用的 Python（${python.attempts.join("；")}）。`);
+  }
+  const child = spawn(python.command, [...python.args, "-c", helperSource(), ...args], {
+    cwd: dataDir,
+    env: childEnv(dataDir),
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  child.unref();
+  return child.pid;
 }
 
 function parseHelperOutput(stdout, stderr) {

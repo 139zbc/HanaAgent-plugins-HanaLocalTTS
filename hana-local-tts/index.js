@@ -5,8 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { defineApp } from "./sdk/app-contract/server-client.js";
 import { KOKORO_VOICES } from "./kokoro-voices.js";
-import { INSTALL_PY_B64, SERVER_PY_B64 } from "./kokoro-files.js";
-import { runHelper, startInstall } from "./kokoro-runtime.js";
+import { runHelper, spawnDetached, startInstall, writeAppSources } from "./kokoro-runtime.js";
 
 export const name = "hana-local-tts";
 
@@ -14,7 +13,6 @@ const SPEECH_TEXT_MAX_BYTES = 32 * 1024; // 宿主的语音文本预算
 const SPEAK_TIMEOUT_MS = 25000;
 const KOKORO_TIMEOUT_MS = 90000;
 const KOKORO_ROOT_DEFAULT = "D:\\ProgramData\\OH-WorkSpace\\hanako\\kokoro-zh";
-const KOKORO_PORT = 8765;
 const KOKORO_DEFAULT_VOICE = "zf_094";
 const KOKORO_VOICE_IDS = new Set(KOKORO_VOICES.map((item) => item.id));
 const PROVIDER_ID = "hana-local-tts";
@@ -205,36 +203,6 @@ async function listVoices(sdk) {
   return parseVoices(stdout);
 }
 
-function runtimePythonScript(root, device) {
-  const folder = device === "cuda" ? ".venv-cuda" : ".venv-cpu";
-  const expect = device === "cuda" ? "cuda" : "cpu";
-  return `
-function Get-TorchKind([string]$venv) {
-  $marker = Join-Path $venv 'runtime.json'
-  if (Test-Path -LiteralPath $marker) {
-    try {
-      $parsed = Get-Content -LiteralPath $marker -Raw -Encoding UTF8 | ConvertFrom-Json
-      if ($parsed.device -eq 'cuda' -or $parsed.device -eq 'cpu') { return [string]$parsed.device }
-    } catch {}
-  }
-  $site = Join-Path (Join-Path $venv 'Lib') 'site-packages'
-  if (-not (Test-Path -LiteralPath $site)) { return '' }
-  $dist = @(Get-ChildItem -LiteralPath $site -Directory -Filter 'torch-*.dist-info' -ErrorAction SilentlyContinue | Select-Object -First 1)
-  if ($dist.Count -eq 0) { return '' }
-  if ($dist[0].Name -like '*+cu*') { return 'cuda' }
-  return 'cpu'
-}
-$namedVenv = Join-Path '${quotePs(root)}' '${folder}'
-$python = Join-Path (Join-Path $namedVenv 'Scripts') 'python.exe'
-if (-not (Test-Path -LiteralPath $python)) {
-  $legacyVenv = Join-Path '${quotePs(root)}' '.venv'
-  if ((Get-TorchKind $legacyVenv) -eq '${expect}') {
-    $python = Join-Path (Join-Path $legacyVenv 'Scripts') 'python.exe'
-  }
-}
-`.trim();
-}
-
 function defaultKokoroRoot() {
   return path.join(os.homedir(), ".hanako", "app-data", "hana-local-tts", "kokoro");
 }
@@ -382,61 +350,7 @@ async function ensureVoiceFile(sdk, root, voice) {
   await sdk.logger.info(`kokoro voice ready: ${voice}`);
 }
 
-function kokoroScript(root, textFile, wavFile, voice, rate, play = true, device = "cpu") {
-  const server = path.join(root, "server.py");
-  const player = play
-    ? `$player = New-Object System.Media.SoundPlayer '${quotePs(wavFile)}'
-$player.PlaySync()
-$player.Dispose()`
-    : "";
-  return `
-$ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
-function Test-Kokoro {
-  try {
-    $health = Invoke-WebRequest -Uri 'http://127.0.0.1:${KOKORO_PORT}/health' -UseBasicParsing -TimeoutSec 2
-    return $health.StatusCode -eq 200
-  } catch {
-    return $false
-  }
-}
-${runtimePythonScript(root, device)}
-${kokoroPidScript(root)}
-${kokoroLaunchPrep(root)}
-if (-not (Test-Kokoro)) {
-  $existing = @(Get-KokoroPids $root)
-  if ($existing.Count -eq 0) {
-    if (-not (Test-Path -LiteralPath $python)) { throw '当前选择的运行环境未下载。' }
-    $env:KOKORO_DEVICE = '${quotePs(device)}'
-    Start-Process -FilePath $python -ArgumentList '${quotePs(server)}' -WorkingDirectory '${quotePs(root)}' -WindowStyle Hidden -RedirectStandardOutput $log -RedirectStandardError $errLog
-  }
-  $deadline = (Get-Date).AddSeconds(180)
-  do {
-    Start-Sleep -Milliseconds 500
-    if (Test-Kokoro) { break }
-  } while ((Get-Date) -lt $deadline)
-  if (-not (Test-Kokoro)) {
-    $tail = ''
-    foreach ($file in @($errLog, $log)) {
-      if (Test-Path -LiteralPath $file) {
-        $lines = @(Get-Content -LiteralPath $file -Tail 1 -ErrorAction SilentlyContinue)
-        if ($lines.Count -gt 0 -and $lines[-1]) { $tail = [string]$lines[-1]; break }
-      }
-    }
-    if ($tail) { throw ('本地 Kokoro 启动超时。' + $tail) } else { throw '本地 Kokoro 启动超时。请再点一次朗读。' }
-  }
-}
-$text = [System.IO.File]::ReadAllText('${quotePs(textFile)}', [System.Text.Encoding]::UTF8)
-$json = @{ input = $text.Trim(); voice = '${quotePs(voice)}'; speed = ${clampRate(rate)} } | ConvertTo-Json -Compress
-$bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
-Invoke-WebRequest -Uri 'http://127.0.0.1:${KOKORO_PORT}/v1/audio/speech' -Method POST -ContentType 'application/json' -Body $bytes -OutFile '${quotePs(wavFile)}' -TimeoutSec 80
-${player}
-`.trim();
-}
-
 async function writeSpeechFile(sdk, text, voice, rate, wavFile, engine, play = true) {
-  const executable = await powershellPath(sdk);
-  if (!executable) throw new Error("找不到 Windows PowerShell，没法把声音放出来。");
   const textFile = `${wavFile}.txt`;
   if (engine === "kokoro") {
     await writeFile(textFile, text, "utf8");
@@ -446,7 +360,22 @@ async function writeSpeechFile(sdk, text, voice, rate, wavFile, engine, play = t
       // 换声音时只补下那一个声音文件；已经在本地就快速返回。
       await ensureVoiceFile(sdk, root, kokoroVoice);
       try {
-        await runPowerShell(executable, kokoroScript(root, textFile, wavFile, kokoroVoice, rate, play, await kokoroDevice(sdk)), 280000);
+        // 合成交给助手：它会保证服务在跑，再请求本机服务出声。
+        await runHelper(
+          sdk,
+          sdk.dataDir,
+          [
+            "speak",
+            "--root", root,
+            "--device", await kokoroDevice(sdk),
+            "--text-file", textFile,
+            "--out", wavFile,
+            "--voice", kokoroVoice,
+            "--speed", String(clampRate(rate)),
+          ],
+          { timeoutMs: 280000 },
+        );
+        if (play) await playWavFile(sdk, wavFile);
       } catch (error) {
         // 声音文件可能被外面动了；下次重新确认一遍。
         readyVoices.delete(kokoroVoice);
@@ -459,6 +388,8 @@ async function writeSpeechFile(sdk, text, voice, rate, wavFile, engine, play = t
     }
     return;
   }
+  const executable = await powershellPath(sdk);
+  if (!executable) throw new Error("找不到 Windows PowerShell，没法把声音放出来。");
   await writeFile(textFile, text, "utf8");
   try {
     const preferChinese = /[\u4e00-\u9fff]/.test(text);
@@ -708,128 +639,10 @@ function speedTypeError(error) {
   return message.includes("speech speed must be a finite number");
 }
 
-// 停止脚本：按端口找 PID，连子进程一起停。输出停掉的 PID 列表（base64）。
-function kokoroPidScript(root) {
-  return `
-function Get-KokoroPids([string]$rootPath) {
-  $needle = $rootPath.TrimEnd('\\').ToLower()
-  $hits = New-Object System.Collections.Generic.List[int]
-  $procs = @(Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue)
-  foreach ($proc in $procs) {
-    $cmd = [string]$proc.CommandLine
-    if (-not $cmd) { continue }
-    $folded = $cmd.ToLower()
-    if ($folded.Contains('server.py') -and $folded.Contains($needle)) { [void]$hits.Add([int]$proc.ProcessId) }
-  }
-  return $hits
-}
-function Stop-PidTree([int[]]$seeds) {
-  $all = New-Object System.Collections.Generic.HashSet[int]
-  $queue = New-Object System.Collections.Generic.Queue[int]
-  foreach ($seed in $seeds) { if (-not $all.Contains([int]$seed)) { [void]$all.Add([int]$seed); $queue.Enqueue([int]$seed) } }
-  while ($queue.Count -gt 0) {
-    $current = $queue.Dequeue()
-    $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $current" -ErrorAction SilentlyContinue)
-    foreach ($child in $children) {
-      $cid = [int]$child.ProcessId
-      if (-not $all.Contains($cid)) { [void]$all.Add($cid); $queue.Enqueue($cid) }
-    }
-  }
-  $stopped = @()
-  foreach ($p in $all) {
-    try { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue; $stopped += $p } catch {}
-  }
-  return $stopped
-}
-`.trim();
-}
 
-function kokoroLaunchPrep(root) {
-  const quoted = quotePs(root);
-  return `
-$root = '${quoted}'
-$log = Join-Path $root 'tmp\\server.log'
-$errLog = Join-Path '${quoted}' 'tmp\\server.err'
-New-Item -ItemType Directory -Force -Path (Join-Path '${quoted}' 'tmp') | Out-Null
-$modelFile = Join-Path '${quoted}' 'hf-cache\\models--hexgrad--Kokoro-82M-v1.1-zh\\snapshots\\installed\\kokoro-v1_1-zh.pth'
-if (Test-Path -LiteralPath $modelFile) { $env:HF_HUB_OFFLINE = '1' } else { Remove-Item Env:HF_HUB_OFFLINE -ErrorAction SilentlyContinue }
-`.trim();
-}
 
-function kokoroStopScript(root) {
-  return `
-$ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
-$root = '${quotePs(root)}'
-${kokoroPidScript(root)}
-$seeds = @(Get-KokoroPids $root)
-if ($seeds.Count -eq 0) { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('none')); exit }
-$stopped = @(Stop-PidTree $seeds)
-if ($stopped.Count -eq 0) { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('none')); exit }
-[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($stopped -join ',')))
-`.trim();
-}
 
-// 启动脚本：拉起 server.py，等健康检查通过。输出 ok。device 是目标模式（cpu/cuda）。
-function kokoroStartScript(root, device) {
-  const server = path.join(root, "server.py");
-  return `
-$ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
-function Test-Kokoro {
-  try {
-    $health = Invoke-WebRequest -Uri 'http://127.0.0.1:${KOKORO_PORT}/health' -UseBasicParsing -TimeoutSec 2
-    return $health.StatusCode -eq 200
-  } catch { return $false }
-}
-${runtimePythonScript(root, device)}
-${kokoroPidScript(root)}
-${kokoroLaunchPrep(root)}
-if (Test-Kokoro) { 'ok'; exit }
-$existing = @(Get-KokoroPids $root)
-if ($existing.Count -eq 0) {
-  if (-not (Test-Path -LiteralPath $python)) { throw '当前选择的运行环境未下载。' }
-  $env:KOKORO_DEVICE = '${quotePs(device)}'
-  Start-Process -FilePath $python -ArgumentList '${quotePs(server)}' -WorkingDirectory '${quotePs(root)}' -WindowStyle Hidden -RedirectStandardOutput $log -RedirectStandardError $errLog
-}
-$deadline = (Get-Date).AddSeconds(180)
-do {
-  Start-Sleep -Milliseconds 500
-  if (Test-Kokoro) { break }
-} while ((Get-Date) -lt $deadline)
-if (-not (Test-Kokoro)) {
-  $tail = ''
-  foreach ($file in @($errLog, $log)) {
-    if (Test-Path -LiteralPath $file) {
-      $lines = @(Get-Content -LiteralPath $file -Tail 1 -ErrorAction SilentlyContinue)
-      if ($lines.Count -gt 0 -and $lines[-1]) { $tail = [string]$lines[-1]; break }
-    }
-  }
-  if ($tail) { throw ('启动超时。' + $tail) } else { throw '启动超时。' }
-}
-'ok'
-`.trim();
-}
 
-// 守护脚本：盯住 Hana 主进程，它退出就停掉 Kokoro（连子进程一起停）。
-// 由 App 用 Start-Process 拉起，独立于 Hana 生命周期。
-function kokoroWatchScript(root) {
-  return `
-$ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
-${kokoroPidScript(root)}
-$watched = Get-Process HanaAgent -ErrorAction SilentlyContinue | Select-Object -First 1
-if (-not $watched) { exit }
-while ($true) {
-  Start-Sleep -Seconds 5
-  if (-not (Get-Process -Id $watched.Id -ErrorAction SilentlyContinue)) {
-    $seeds = @(Get-KokoroPids '${quotePs(root)}')
-    if ($seeds.Count -gt 0) { Stop-PidTree $seeds | Out-Null }
-    exit
-  }
-}
-`.trim();
-}
 
 async function savedSpeed(sdk) {
   const executable = await powershellPath(sdk);
@@ -927,6 +740,28 @@ async function startKokoroInstall(sdk, root, source, pipSource, torchSource, com
 }
 
 let watcherRunning = false;
+let watcherChild = null;
+
+// 「自动停止」开关的标记文件：守护进程看到它没了就不再停服务。
+function autoStopFlagPath(sdk) {
+  return path.join(sdk.dataDir, "kokoro-autostop.flag");
+}
+
+// 守护进程把自己的进程号写在这里，停了以后按它杀整棵树。
+function watcherPidPath(sdk) {
+  return path.join(sdk.dataDir, "kokoro-watch.pid");
+}
+
+// 找 Hana 桌面端的进程号（守护要盯着它）。
+async function findHanaPid(sdk) {
+  try {
+    const result = await runHelper(sdk, sdk.dataDir, ["hana-pid"], { timeoutMs: 20000 });
+    const pid = result && Number(result.pid);
+    return Number.isFinite(pid) && pid > 0 ? pid : 0;
+  } catch {
+    return 0;
+  }
+}
 
 // 方案 A：把“这次 Hana 会话”的标记写进状态文件。
 // App 启动时若发现 8765 在跑，但标记里的 Hana 进程已经不在了，说明是上次遗留，先停掉。
@@ -976,15 +811,9 @@ async function cleanupOrphanKokoro(sdk) {
   const marker = await readSessionMarker(sdk);
   if (!marker.hanaPid) return false;
   // 标记里的 Hana 进程还活着 → 不是遗留，不动
-  const executable = await powershellPath(sdk);
-  if (!executable) return false;
-  const aliveScript = `
-$ErrorActionPreference = 'Stop'
-if (Get-Process -Id ${marker.hanaPid} -ErrorAction SilentlyContinue) { 'alive' } else { 'dead' }
-`.trim();
   try {
-    const { stdout } = await runPowerShell(executable, aliveScript, 15000);
-    if (String(stdout || "").includes("alive")) return false;
+    const result = await runHelper(sdk, sdk.dataDir, ["alive", "--pid", String(marker.hanaPid)], { timeoutMs: 15000 });
+    if (result && result.alive === true) return false;
   } catch {
     return false;
   }
@@ -1000,143 +829,88 @@ if (Get-Process -Id ${marker.hanaPid} -ErrorAction SilentlyContinue) { 'alive' }
 
 async function startKokoroService(sdk) {
   const root = await kokoroRoot(sdk);
-  const executable = await powershellPath(sdk);
-  if (!executable) throw new Error("找不到 Windows PowerShell。");
   const device = await kokoroDevice(sdk);
-  const { stdout } = await runPowerShell(executable, kokoroStartScript(root, device), 200000);
-  if (!String(stdout || "").includes("ok")) throw new Error("启动没有成功。");
+  await syncServerCode(sdk, root);
+  const result = await runHelper(sdk, sdk.dataDir, ["start", "--root", root, "--device", device], { timeoutMs: 200000 });
+  if (!result || result.running !== true) throw new Error("启动没有成功。");
   await ensureWatcher(sdk);
   return { ok: true };
 }
 
-// 只拉起进程，不等模型加载完。切换请求要马上返回，避免页面把慢启动当成失败。
-function kokoroSpawnScript(root, device) {
-  const server = path.join(root, "server.py");
-  return `
-$ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
-${runtimePythonScript(root, device)}
-${kokoroPidScript(root)}
-${kokoroLaunchPrep(root)}
-$existing = @(Get-KokoroPids $root)
-if ($existing.Count -eq 0) {
-  if (-not (Test-Path -LiteralPath $python)) { throw '当前选择的运行环境未下载。' }
-  $env:KOKORO_DEVICE = '${quotePs(device)}'
-  Start-Process -FilePath $python -ArgumentList '${quotePs(server)}' -WorkingDirectory '${quotePs(root)}' -WindowStyle Hidden -RedirectStandardOutput $log -RedirectStandardError $errLog
-}
-'spawned'
-`.trim();
+// 把最新的 server.py 同步到安装目录：服务代码会随 App 升级，跑老代码容易出怪问题。
+async function syncServerCode(sdk, root) {
+  try {
+    await writeAppSources(sdk.dataDir);
+    await runHelper(sdk, sdk.dataDir, ["sync", "--root", root, "--app-dir", sdk.dataDir], { timeoutMs: 20000 });
+  } catch (error) {
+    await sdk.logger.error(`kokoro source sync failed: ${failureText(error)}`);
+  }
 }
 
 async function spawnKokoroService(sdk) {
   const root = await kokoroRoot(sdk);
-  const executable = await powershellPath(sdk);
-  if (!executable) throw new Error("找不到 Windows PowerShell。");
   const device = await kokoroDevice(sdk);
-  const { stdout } = await runPowerShell(executable, kokoroSpawnScript(root, device), 20000);
-  if (!String(stdout || "").includes("spawned")) throw new Error("启动没有成功。");
+  await syncServerCode(sdk, root);
+  const result = await runHelper(sdk, sdk.dataDir, ["start", "--root", root, "--device", device, "--wait", "0"], { timeoutMs: 30000 });
+  if (!result || result.started !== true) throw new Error("启动没有成功。");
   await ensureWatcher(sdk);
   return { ok: true };
 }
 
 async function readKokoroLive(sdk) {
-  const executable = await powershellPath(sdk);
-  if (!executable) return { running: false, device: "" };
-  const script = `
-$ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
-try {
-  $health = Invoke-WebRequest -Uri 'http://127.0.0.1:${KOKORO_PORT}/health' -UseBasicParsing -TimeoutSec 2
-  if ($health.StatusCode -ne 200) { 'down'; exit }
-  $parsed = $health.Content | ConvertFrom-Json
-  if ($parsed.device -eq 'cuda') { 'cuda' } elseif ($parsed.device -eq 'cpu') { 'cpu' } else { 'up' }
-} catch { 'down' }
-`.trim();
   try {
-    const { stdout } = await runPowerShell(executable, script, 8000);
-    const text = String(stdout || "");
-    if (text.includes("cuda")) return { running: true, device: "cuda" };
-    if (text.includes("cpu")) return { running: true, device: "cpu" };
-    return { running: false, device: "" };
+    const result = await runHelper(sdk, sdk.dataDir, ["live"], { timeoutMs: 10000 });
+    return { running: result && result.running === true, device: result && typeof result.device === "string" ? result.device : "" };
   } catch {
     return { running: false, device: "" };
   }
 }
 
 async function stopKokoroService(sdk, rootOverride) {
-  const executable = await powershellPath(sdk);
-  if (!executable) throw new Error("找不到 Windows PowerShell。");
   // rootOverride：服务在别的目录跑的时候（比如换过安装路径），按它自己的目录找进程。
   const root = rootOverride || (await kokoroRoot(sdk));
-  const { stdout } = await runPowerShell(executable, kokoroStopScript(root), 30000);
-  const b64 = String(stdout || "").trim().split(/\r?\n/).filter((line) => /^[A-Za-z0-9+/=]+$/.test(line.trim())).pop() || "";
-  const stopped = b64 ? Buffer.from(b64, "base64").toString("utf8") : "none";
-  await sdk.logger.info(`kokoro stopped: ${stopped}`);
-  return { ok: true, stopped: stopped === "none" ? [] : stopped.split(",").filter(Boolean) };
+  const result = await runHelper(sdk, sdk.dataDir, ["stop", "--root", root], { timeoutMs: 30000 });
+  const stopped = result && Array.isArray(result.stopped) ? result.stopped : [];
+  await sdk.logger.info(`kokoro stopped: ${stopped.join(",") || "none"}`);
+  return { ok: true, stopped };
 }
 
 async function stopWatcher(sdk) {
-  const executable = await powershellPath(sdk);
-  if (!executable) return;
-  const script = `
-$ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
-$watchers = @(Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like '*kokoro-watch.ps1*' })
-foreach ($w in $watchers) { Stop-Process -Id $w.ProcessId -Force -ErrorAction SilentlyContinue }
-$watchers.Count
-`.trim();
+  watcherRunning = false;
+  // 守护进程看到开关被关掉就不再停服务（它自己会退出）。
+  await rm(autoStopFlagPath(sdk), { force: true }).catch(() => {});
+  // 旧版本留下的 PowerShell 守护脚本没用了，清掉。
+  await rm(path.join(sdk.dataDir, "kokoro-watch.ps1"), { force: true }).catch(() => {});
   try {
-    const { stdout } = await runPowerShell(executable, script, 15000);
-    watcherRunning = false;
-    const count = Number(String(stdout || "").trim());
-    await sdk.logger.info(`kokoro watcher stopped (${count})`);
-    return count || 0;
+    await runHelper(sdk, sdk.dataDir, ["watch-stop", "--pid-file", watcherPidPath(sdk)], { timeoutMs: 20000 });
   } catch (error) {
     await sdk.logger.error(`kokoro watcher stop failed: ${failureText(error)}`);
-    return 0;
   }
+  watcherChild = null;
+  await sdk.logger.info("kokoro watcher stopped");
+  return 1;
 }
 
 async function ensureWatcher(sdk) {
   if (watcherRunning) return;
   if (!(await autoStopEnabled(sdk))) return;
-  const executable = await powershellPath(sdk);
-  if (!executable) return;
-  // 先查一遍：App 重载后内存标志归零，但旧 watcher 可能还在跑，不重复拉
-  const checkScript = `
-$ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
-$existing = @(Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like '*kokoro-watch.ps1*' })
-"count=$($existing.Count)"
-`.trim();
+  const root = await kokoroRoot(sdk);
+  const hanaPid = await findHanaPid(sdk);
+  if (!hanaPid) return;
+  // 开关文件：用户关掉「自动停止」时删掉它，守护进程就不再停服务。
+  const flag = autoStopFlagPath(sdk);
+  await mkdir(path.dirname(flag), { recursive: true });
+  await writeFile(flag, String(hanaPid), "utf8");
   try {
-    const { stdout } = await runPowerShell(executable, checkScript, 15000);
-    if (/count=[1-9]/.test(String(stdout || ""))) {
-      watcherRunning = true;
-      return;
-    }
-  } catch {
-    // 查不到就继续尝试拉起
-  }
-  // watcher 脚本很长（base64 后超过命令行 32KB 上限），必须先写文件再用 -File 执行
-  const scriptFile = path.join(sdk.dataDir, "kokoro-watch.ps1");
-  await mkdir(path.dirname(scriptFile), { recursive: true });
-  await writeFile(scriptFile, kokoroWatchScript(await kokoroRoot(sdk)), "utf8");
-  const script = `
-$ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
-$hana = Get-Process HanaAgent -ErrorAction SilentlyContinue | Select-Object -First 1
-if (-not $hana) { 'no-hana'; exit }
-Start-Process -FilePath '${quotePs(executable)}' -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', '${quotePs(scriptFile)}') -WindowStyle Hidden
-"watcher-spawned $($hana.Id)"
-`.trim();
-  try {
-    const { stdout } = await runPowerShell(executable, script, 15000);
-    const text = String(stdout || "").trim();
-    if (text.includes("no-hana")) return;
+    watcherChild = await spawnDetached(sdk, sdk.dataDir, [
+      "watch",
+      "--root", root,
+      "--pid", String(hanaPid),
+      "--flag", flag,
+      "--pid-file", watcherPidPath(sdk),
+    ]);
     watcherRunning = true;
-    const pidMatch = text.match(/watcher-spawned (\d+)/);
-    if (pidMatch) await writeSessionMarker(sdk, Number(pidMatch[1]));
+    await writeSessionMarker(sdk, hanaPid);
     await sdk.logger.info("kokoro watcher started");
   } catch (error) {
     await sdk.logger.error(`kokoro watcher failed to start: ${failureText(error)}`);

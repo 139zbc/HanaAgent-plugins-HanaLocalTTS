@@ -13,13 +13,15 @@
 
 设置页把模型、CPU 运行环境、GPU 运行环境分开显示。状态用「具备」和「未下载」。同一时间只跑一套；已经下好的那套，切换时不再下载。
 
+服务启停已经搬到 Python 助手：Node 只管调度，拉服务、停服务、守着 Hana 退出自动停服务，全由助手（子进程）做。系统语音合成和播放仍走 PowerShell（Node 没有 .NET/SAPI）。
+
 本地模型装在 `D:\ProgramData\OH-WorkSpace\hanako\kokoro-zh`，不在这个 Git 仓库里。服务脚本的存档副本是 [kokoro/server.py](kokoro/server.py)。正在跑的那份在模型目录里，改脚本时两份要一起改。
 
 完整计划见 [PLAN.md](PLAN.md)。
 
 改完插件后，把 `hana-local-tts` 复制到 `C:\Users\Fantasy\.hanako\apps\hana-local-tts`，Hana 里打开的才是这份。
 
-下一步：重新加载这个 App。模型只下要用的文件（config + 权重 + 当前选中的那一个声音），换声音时再补下那一个；依赖安装的进度条会报真实字节和速度，卡住会自己重试。设一个新建的空目录（如 `D:\tmp\hana-local-tts\kokoro3`）点「模型 → 下载」和「CPU 运行环境 → 下载」，确认两个阶段的进度都看得见。
+下一步：重新加载这个 App，确认「启动 / 停止」按钮正常、停完不留 `server.py` 进程、关掉 Hana 后服务自己停。然后做 M14-4——首装自动下载 Python 3.12.14 到 app-data（`curl.exe` 下载 + `tar.exe` 解包），设置页加一行「Python 运行环境」。
 
 ## 开发约定
 

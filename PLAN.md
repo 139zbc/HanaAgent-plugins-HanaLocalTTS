@@ -169,6 +169,16 @@
 - 踩过的坑：① 换到新路径后，下载时弹出一个黑色控制台窗口。原因是 install.py 自己没有控制台（宿主里是隐藏窗口起的），它再起 pip 时没带「不要新窗口」的标志，Windows 就给 pip 新开了一个控制台。修法：install.py 起的每个子进程都加 `CREATE_NO_WINDOW`（0x08000000）。实测：不带标志会多出一个 conhost 进程，带了就不会。M14-3 起服务时同样要注意这个。
 - 踩过的坑（进度条往回跳）：根因有三个，都修了。① 读子进程输出用的是 `read(256)`，要凑满 256 字节才返回——一批输出里的百分比会在同一瞬间写进状态文件，最后一个（下一个包刚开头的小百分比）就把进度条拉回去了。改用 `read1`（有多少读多少）。② pip 每下一个包，进度从 0 重新开始，直接用单包百分比会倒退。改成按包统计：`(已下完的包数 + 当前包的比率) / (已下完的包数 + 1)`，每下完一个包往上走一截。③ 各阶段的百分比区间本来是重叠的（GPU：依赖 8–78、torch 32–88；模型：依赖 8–40、下载 15–88），阶段切换时必然回跳。改成首尾相接，并在阶段之间用「历史最高水位」接上。实测：模拟三包下载，百分比 16 → 48 → 48.8 → 61.3 → 62.1 → 68，一路向前。
 
+**M14-3 结果**：代码已就位，等用户在 Hana 里验收。
+- `index.js` 里 7 个拼 PowerShell 的生成器全删了（`runtimePythonScript` / `kokoroScript` / `kokoroPidScript` / `kokoroLaunchPrep` / `kokoroStopScript` / `kokoroStartScript` / `kokoroWatchScript` / `kokoroSpawnScript`），`index.js` 从 1400 多行瘦到 1200 行左右。系统语音合成、播放、读宿主偏好这三处仍走 PowerShell（Node 没有 .NET/SAPI，这是设计保留）。
+- 助手新增子命令：`start`（拉服务 + 等健康检查，最多 180 秒）、`stop`、`watch`（守 Hana 主进程）、`alive`、`live`、`speak`、`hana-pid`、`sync`、`watch-stop`。`server.py` 增 `POST /shutdown`，并在加载模型**之前**就把 pid 写进 `kokoro.pid`（不然加载模型那几十秒里服务已经占着端口，停了却找不到 pid）。
+- 停止顺序改成三级：先 `POST /shutdown` 让它自己退；不行按 `kokoro.pid` 杀进程树；还不行按命令行扫（升级前跑着的老服务没有 pid 文件，也不认 `/shutdown`）。
+- 守护进程从「PowerShell 脚本」改成「助手自己常驻」：Node 用 `detached` 起一个 `watch` 子进程，它死等 Hana 主进程退出，Hana 一没就停服务。守护把 pid 写进 `kokoro-watch.pid`，停守护时按 pid 杀整棵树。旧版本留下的 PowerShell 守护（认 `kokoro-watch.ps1`）会在停守护时一并清掉。
+- 「自动停止」开关改成标记文件 `app-data/kokoro-autostop.flag`：关掉开关就删文件，守护进程发现文件没了就不再停服务；开开关时重新写上并拉守护。
+- 每次开服务前先 `sync` 一遍：把最新的 `server.py` 同步进安装目录，免得升级后跑的还是老代码。
+- 踩过的坑：① `tasklist` 在某些环境下直接报「Access denied」，助手退到 PowerShell 的 `Get-Process` 兜底（先 `tasklist`，再 `Get-Process`）；杀进程同理，`taskkill` 不行就用 `Stop-Process`。② 本地开发沙箱里**不能往新建的目录里写文件**，espeak 的 dll 拷贝过不去，服务起不来——这是沙箱限制，不是代码问题；真实环境（App 起的子进程）不受影响。③ `phonemizer` 在 Windows 上必然要把 `espeak-ng.dll` 拷进临时目录，临时目录得可写，所以助手给 `start` 加了 `--temp-dir` 参数。
+- 踩过的坑（守护进程会闪黑窗口）：Windows 上 `CREATE_NO_WINDOW` 和 `DETACHED_PROCESS` 不能同时用，Node 的 `detached: true` + `windowsHide: true` 里，真正生效的是 `DETACHED_PROCESS`——它会给子进程**单开一个控制台**，`windowsHide` 被忽略。实测：detached 拉起来的进程 `GetConsoleWindow()` 不为 0（说明有控制台窗口），只用 `windowsHide` 才是 0（压根没控制台）。修法：守护进程改成普通 spawn + `windowsHide: true`（普通 spawn 的子进程照样能活过父进程退出，实测成立），服务与安装的子进程改用 `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP`（实测 `hwnd=0`）。
+
 **不做什么**：不动系统语音（System.Speech）和本地播放，仍走 PowerShell；不读宿主 `preferences.json`（在 app-data 外），仍走 PowerShell；不引进 uv；不给插件加网络权限；不做断点续传下载器。
 
 ### M15：模型只取要用的文件 + 声音按需补下 + 进度条说人话
@@ -238,9 +248,9 @@
 - [x] M12-2 面板加操作（试读、启停）+ 修掉试读误报失败、语速与多媒体不一致两个 bug
 - [ ] M12-3 设置页视觉统一
 - [ ] M13 模型 / CPU 运行环境 / GPU 运行环境分开显示和下载（状态：具备、未下载）
-- [ ] M14-1 助手 + 运行时骨架，状态探测去掉 PowerShell
-- [ ] M14-2 安装调度搬到 Node
-- [ ] M14-3 服务启停搬到 Node
+- [x] M14-1 助手 + 运行时骨架，状态探测去掉 PowerShell
+- [x] M14-2 安装调度搬到 Node
+- [x] M14-3 服务启停搬到 Node（代码就位，待用户在 Hana 里验收）
 - [ ] M14-4 自动下载 Python 3.12.14
 - [x] M15-1 模型只取要用的文件（config + 权重 + 选中的那一个声音）
 - [x] M15-2 换声音按需补下那一个声音文件

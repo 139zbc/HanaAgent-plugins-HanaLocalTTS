@@ -56,11 +56,14 @@ h2 {
 }
 
 /* 卡内分隔线：两端缩进，跟宿主一致。
-   宿主用的是 height + background（不是 border-top），粗细取 --border-width。 */
-.row + .row::before,
-.piece + .piece::before,
-.piece + .row::before,
-.row + .piece::before {
+   宿主用的是 height + background（不是 border-top），粗细取 --border-width。
+
+   不能写成「相邻兄弟」：每行下面都跟着一句错误提示（<p class="row-error">），
+   它夹在两行中间就把相邻关系打断了，分割线会整片消失（运行状态和安装路径之间
+   那条就是这么没的）。改成「卡内除第一项外都画线」，错误提示行本来就不是 .row，
+   不受影响。 */
+.card > .row::before,
+.card > .piece::before {
   content: "";
   position: absolute;
   top: 0;
@@ -68,6 +71,12 @@ h2 {
   right: var(--tts-divider-inset);
   height: var(--tts-border-width);
   background: var(--tts-card-divider);
+}
+
+/* 每张卡的第一项不画线 */
+.card > .row:first-child::before,
+.card > .piece:first-child::before {
+  content: none;
 }
 
 .piece { position: relative; }

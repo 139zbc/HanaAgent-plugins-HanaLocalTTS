@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -25,6 +26,21 @@ TMP = os.path.join(ROOT, "tmp")
 os.makedirs(TMP, exist_ok=True)
 os.environ["TEMP"] = TMP
 os.environ["TMP"] = TMP
+
+
+def write_pid_file():
+    """把自己的 pid 写下来：停止时按它杀进程树。
+
+    得在加载模型之前写——加载模型要几十秒，那段时间里服务已经占着端口了。
+    """
+    try:
+        with open(os.path.join(ROOT, "kokoro.pid"), "w", encoding="utf-8") as handle:
+            handle.write(str(os.getpid()))
+    except OSError:
+        pass
+
+
+write_pid_file()
 
 
 def build_pipeline():
@@ -53,7 +69,17 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self):
-        if self.path.split("?", 1)[0] != "/v1/audio/speech":
+        path = self.path.split("?", 1)[0]
+        if path == "/shutdown":
+            # 自己退出：助手先请服务退，退不动再按 pid 文件杀进程树。
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+            threading.Thread(target=server.shutdown, daemon=True).start()
+            return
+        if path != "/v1/audio/speech":
             self.send_error(404)
             return
         length = int(self.headers.get("Content-Length", "0"))

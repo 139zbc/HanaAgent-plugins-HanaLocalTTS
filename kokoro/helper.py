@@ -7,12 +7,14 @@ App 进程受 Node 权限模型限制：只能读安装目录和自己的 app-da
 约定：每次调用只往 stdout 写一行 JSON，出错写 stderr 并以非零码退出。
 """
 
+import ctypes
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 import urllib.request
 
 PORT = int(os.environ.get("KOKORO_PORT", "8765"))
@@ -186,6 +188,25 @@ def cmd_probe(argv):
     })
 
 
+def cmd_sync(argv):
+    """把 App 数据目录里的 server.py / install.py 同步到安装目录。
+
+    服务代码会随 App 升级，每次开服务前先同步一遍，免得跑的还是老代码。
+    """
+    args, rest = parse_args(argv)
+    root = os.path.abspath(args.get("root") or ".")
+    app_dir = os.path.abspath(args.get("app-dir") or ".")
+    os.makedirs(root, exist_ok=True)
+    copied = []
+    for name in ("server.py", "install.py"):
+        source_file = os.path.join(app_dir, name)
+        if not os.path.isfile(source_file):
+            continue
+        shutil.copy2(source_file, os.path.join(root, name))
+        copied.append(name)
+    emit({"synced": copied, "root": root})
+
+
 def cmd_install(argv):
     """把 App 数据目录里的 server.py / install.py 搬进安装目录，再起 install.py。
 
@@ -228,7 +249,8 @@ def cmd_install(argv):
     ]
     flags = 0
     if os.name == "nt":
-        flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+        # CREATE_NO_WINDOW：不给它控制台，下载时不会闪黑窗口。
+        flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
     process = subprocess.Popen(
         command,
         cwd=root,
@@ -256,7 +278,7 @@ def cmd_gpu(argv):
         except Exception:
             pass
     try:
-        shell = os.path.join(system_root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+        shell = powershell_exe()
         script = "Get-CimInstance Win32_VideoController | Where-Object { $_.Name -like '*NVIDIA*' } | Select-Object -First 1 -ExpandProperty Name"
         result = subprocess.run(
             [shell, "-NoProfile", "-NonInteractive", "-Command", script],
@@ -329,11 +351,422 @@ def cmd_voice(argv):
     fail("声音文件没下成。" + "；".join(errors))
 
 
+def venv_python(root: str, device: str) -> str:
+    """找到这套设备该用的解释器：新环境用 .venv-cpu/.venv-cuda，老的 .venv 看 torch 认。"""
+    folder = ".venv-cuda" if device == "cuda" else ".venv-cpu"
+    named = os.path.join(root, folder, "Scripts", "python.exe")
+    if os.path.isfile(named):
+        return named
+    legacy = os.path.join(root, ".venv")
+    if legacy_device(legacy) == device:
+        candidate = os.path.join(legacy, "Scripts", "python.exe")
+        if os.path.isfile(candidate):
+            return candidate
+    return ""
+
+
+def service_state() -> dict:
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:%d/health" % PORT, timeout=2) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return {"running": False, "device": "", "root": ""}
+    if not isinstance(body, dict):
+        return {"running": False, "device": "", "root": ""}
+    return {
+        "running": True,
+        "device": str(body.get("device") or ""),
+        "root": str(body.get("root") or ""),
+    }
+
+
+def pid_alive(pid: int) -> bool:
+    if not pid:
+        return False
+    try:
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, int(pid))
+    except Exception:
+        return False
+    if not handle:
+        return False
+    ctypes.windll.kernel32.CloseHandle(handle)
+    return True
+
+
+def wait_pid_exit(pid: int) -> None:
+    """等一个进程自己退出。不轮询，直接等内核通知。"""
+    if not pid:
+        return
+    handle = ctypes.windll.kernel32.OpenProcess(0x00100000, False, int(pid))
+    if not handle:
+        return
+    try:
+        ctypes.windll.kernel32.WaitForSingleObject(handle, 0xFFFFFFFF)
+    finally:
+        ctypes.windll.kernel32.CloseHandle(handle)
+
+
+def start_service(root: str, device: str, wait: bool = True, temp_dir: str = "") -> dict:
+    state = service_state()
+    if state["running"]:
+        return {"started": False, "running": True, "device": state["device"], "pid": 0}
+    python = venv_python(root, device)
+    if not python:
+        fail("当前选择的运行环境未下载。")
+    server = os.path.join(root, "server.py")
+    if not os.path.isfile(server):
+        fail("安装目录里没有 server.py，请重新安装。")
+    tmp = os.path.join(root, "tmp")
+    os.makedirs(tmp, exist_ok=True)
+    env = os.environ.copy()
+    env["KOKORO_DEVICE"] = device
+    env["HF_HUB_CACHE"] = os.path.join(root, "hf-cache")
+    env["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+    # 临时目录默认放在安装目录里；也可以指到别处（装依赖时目录可能不让写）。
+    temp_root = os.path.abspath(temp_dir) if temp_dir else tmp
+    try:
+        os.makedirs(temp_root, exist_ok=True)
+    except OSError:
+        temp_root = tmp
+    env["TEMP"] = temp_root
+    env["TMP"] = temp_root
+    model = os.path.join(root, "hf-cache", MODEL_DIR, "snapshots", "installed", MODEL_FILE)
+    if os.path.isfile(model):
+        env["HF_HUB_OFFLINE"] = "1"
+    out = open(os.path.join(tmp, "server.log"), "a", encoding="utf-8")
+    err = open(os.path.join(tmp, "server.err"), "a", encoding="utf-8")
+    flags = 0
+    if os.name == "nt":
+        # CREATE_NO_WINDOW：服务不能弹控制台。DETACHED_PROCESS 会给它单开一个
+        # 控制台（CREATE_NO_WINDOW 会被忽略），反而会看到黑窗口。
+        flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+    process = subprocess.Popen(
+        [python, server],
+        cwd=root,
+        env=env,
+        stdout=out,
+        stderr=err,
+        creationflags=flags,
+        close_fds=True,
+    )
+    if not wait:
+        return {"started": True, "running": False, "device": device, "pid": process.pid}
+    deadline = time.monotonic() + 180
+    while time.monotonic() < deadline:
+        state = service_state()
+        if state["running"]:
+            return {"started": True, "running": True, "device": state["device"], "pid": process.pid}
+        if process.poll() is not None:
+            tail = ""
+            for name in ("server.err", "server.log"):
+                path = os.path.join(tmp, name)
+                if os.path.isfile(path):
+                    try:
+                        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                            lines = [line.strip() for line in handle.read().splitlines() if line.strip()]
+                        if lines:
+                            tail = lines[-1]
+                            break
+                    except OSError:
+                        pass
+            fail("本地 Kokoro 启动超时。" + (tail if tail else ""))
+        time.sleep(0.5)
+    fail("本地 Kokoro 启动超时。请再点一次朗读。")
+
+
+def _service_pids_by_command(root: str) -> list:
+    """按命令行找跑着这个目录 server.py 的进程。
+
+    服务升级前启动的老进程没有 pid 文件，也不懂 /shutdown，只能这样扫。
+    """
+    needle = os.path.abspath(root).replace("'", "''")
+    script = (
+        "$ids = @(Get-CimInstance Win32_Process -Filter \"Name = 'python.exe'\" -ErrorAction SilentlyContinue "
+        "| Where-Object { $_.CommandLine -and $_.CommandLine -like '*%s*' } "
+        "| Select-Object -ExpandProperty ProcessId); $ids -join ','" % needle
+    )
+    try:
+        result = subprocess.run(
+            [powershell_exe(), "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, timeout=30,
+        )
+    except Exception:
+        return []
+    pids = []
+    for item in (result.stdout or "").strip().split(","):
+        item = item.strip()
+        if item.isdigit():
+            pids.append(int(item))
+    return pids
+
+
+def stop_service(root: str) -> dict:
+    """先请服务自己退；不行再按 pid 文件杀进程树；还不行就按命令行扫。"""
+    stopped = []
+    try:
+        request = urllib.request.Request(
+            "http://127.0.0.1:%d/shutdown" % PORT, method="POST", data=b"",
+        )
+        urllib.request.urlopen(request, timeout=5).read()
+        stopped.append("shutdown")
+    except Exception:
+        pass
+    pid_file = os.path.join(root, "kokoro.pid")
+    pid = 0
+    try:
+        with open(pid_file, "r", encoding="utf-8") as handle:
+            pid = int((handle.read() or "0").strip() or 0)
+    except (OSError, ValueError):
+        pid = 0
+    if pid and pid_alive(pid):
+        if not _taskkill(pid):
+            _stop_process(pid)
+        stopped.append(str(pid))
+    try:
+        os.remove(pid_file)
+    except OSError:
+        pass
+    if service_state()["running"]:
+        # 服务还在：可能是升级前的老进程，按命令行找出来杀掉。
+        for other in _service_pids_by_command(root):
+            if not _taskkill(other):
+                _stop_process(other)
+            stopped.append(str(other))
+    return {"stopped": stopped}
+
+
+def _taskkill(pid: int) -> bool:
+    try:
+        result = subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, text=True, timeout=30,
+        )
+    except Exception:
+        return False
+    return result.returncode == 0
+
+
+def _stop_process(pid: int) -> bool:
+    script = "Stop-Process -Id %d -Force -ErrorAction SilentlyContinue" % int(pid)
+    try:
+        result = subprocess.run(
+            [powershell_exe(), "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, timeout=30,
+        )
+    except Exception:
+        return False
+    return result.returncode == 0
+
+
+def cmd_start(argv):
+    args, rest = parse_args(argv)
+    root = os.path.abspath(args.get("root") or ".")
+    device = args.get("device") or "cpu"
+    wait = (args.get("wait") or "1").lower() not in ("0", "false", "no")
+    emit(start_service(root, device, wait=wait, temp_dir=args.get("temp-dir") or ""))
+
+
+def cmd_stop(argv):
+    args, rest = parse_args(argv)
+    root = os.path.abspath(args.get("root") or ".")
+    emit(stop_service(root))
+
+
+def cmd_watch(argv):
+    """守着 Hana 主进程：它退出就把本地 Kokoro 停掉。"""
+    args, rest = parse_args(argv)
+    root = os.path.abspath(args.get("root") or ".")
+    flag = args.get("flag") or ""
+    pid_file = args.get("pid-file") or ""
+    if pid_file:
+        # 记下自己的进程号，App 那边要停守护进程时用得上。
+        try:
+            with open(pid_file, "w", encoding="utf-8") as handle:
+                handle.write(str(os.getpid()))
+        except OSError:
+            pass
+    wait_pid_exit(int(args.get("pid") or 0))
+    if flag and not os.path.isfile(flag):
+        # 用户把「自动停止」关了，就不动服务。
+        return
+    try:
+        stop_service(root)
+    except Exception:
+        pass
+    if pid_file:
+        try:
+            os.remove(pid_file)
+        except OSError:
+            pass
+
+
+def _kill_legacy_watchers() -> int:
+    """干掉旧版本留下的 PowerShell 守护进程（认 kokoro-watch.ps1）。"""
+    script = (
+        "$ids = @(Get-CimInstance Win32_Process -Filter \"Name = 'powershell.exe'\" -ErrorAction SilentlyContinue "
+        "| Where-Object { $_.CommandLine -and $_.CommandLine -like '*kokoro-watch.ps1*' } "
+        "| Select-Object -ExpandProperty ProcessId); "
+        "foreach ($id in $ids) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }; $ids.Count"
+    )
+    try:
+        result = subprocess.run(
+            [powershell_exe(), "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, timeout=30,
+        )
+    except Exception:
+        return 0
+    try:
+        return int((result.stdout or "").strip() or 0)
+    except ValueError:
+        return 0
+
+
+def cmd_watch_stop(argv):
+    """停掉守护进程：按它写的进程号杀整棵树。"""
+    args, rest = parse_args(argv)
+    pid_file = args.get("pid-file") or ""
+    pid = 0
+    try:
+        with open(pid_file, "r", encoding="utf-8") as handle:
+            pid = int((handle.read() or "0").strip() or 0)
+    except (OSError, ValueError):
+        pid = 0
+    stopped = False
+    if pid and pid_alive(pid):
+        stopped = _taskkill(pid) or _stop_process(pid)
+    try:
+        os.remove(pid_file)
+    except OSError:
+        pass
+    legacy = _kill_legacy_watchers()
+    emit({"stopped": stopped, "pid": pid, "legacy": legacy})
+
+
+def cmd_alive(argv):
+    args, rest = parse_args(argv)
+    emit({"alive": pid_alive(int(args.get("pid") or 0))})
+
+
+def cmd_live(argv):
+    emit(service_state())
+
+
+def cmd_speak(argv):
+    """让本地 Kokoro 合成一段话，结果写成 wav 文件。"""
+    args, rest = parse_args(argv)
+    root = os.path.abspath(args.get("root") or ".")
+    device = args.get("device") or "cpu"
+    text_file = os.path.abspath(args.get("text-file") or "")
+    out_file = os.path.abspath(args.get("out") or "")
+    voice = args.get("voice") or ""
+    speed = args.get("speed") or "1"
+    with open(text_file, "r", encoding="utf-8") as handle:
+        text = handle.read().strip()
+    state = service_state()
+    if not state["running"]:
+        state = start_service(root, device, wait=True)
+    payload = json.dumps({"input": text, "voice": voice, "speed": float(speed)}).encode("utf-8")
+    request = urllib.request.Request(
+        "http://127.0.0.1:%d/v1/audio/speech" % PORT,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=180) as response:
+        audio = response.read()
+    with open(out_file, "wb") as handle:
+        handle.write(audio)
+    emit({"ok": True, "bytes": len(audio), "device": state.get("device", "")})
+
+
+def powershell_exe() -> str:
+    system_root = os.environ.get("SystemRoot") or r"C:\Windows"
+    return os.path.join(system_root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+
+
+def find_process_by_name(name: str) -> int:
+    """按进程名找 pid。先问 PowerShell（能看启动时间），不行再问 tasklist。"""
+    pid = _find_by_powershell(name)
+    if pid:
+        return pid
+    return _find_by_tasklist(name)
+
+
+def _find_by_tasklist(name: str) -> int:
+    try:
+        result = subprocess.run(
+            ["tasklist", "/fo", "csv", "/nh"], capture_output=True, text=True, timeout=20,
+        )
+    except Exception:
+        return 0
+    for line in (result.stdout or "").splitlines():
+        parts = [item.strip().strip('"') for item in line.split('","')]
+        if len(parts) >= 2 and parts[0].lower() == name.lower():
+            try:
+                return int(parts[1])
+            except ValueError:
+                return 0
+    return 0
+
+
+def _find_by_powershell(name: str) -> int:
+    """找 Hana 主进程的 pid。
+
+    机器上常有多个同名进程（主进程 + 渲染进程）。要盯的是那一堆里的根，
+    不然渲染进程先退，服务就被停了。
+    """
+    base = name[:-4] if name.lower().endswith(".exe") else name
+    # 先找进程树里的根：父进程不在这一堆里的那个。
+    script = (
+        "$all = @(Get-CimInstance Win32_Process -Filter \"Name = '%s.exe'\" -ErrorAction SilentlyContinue); "
+        "$ids = @($all | Select-Object -ExpandProperty ProcessId); "
+        "$roots = @($all | Where-Object { $ids -notcontains $_.ParentProcessId }); "
+        "if ($roots.Count -eq 0) { $roots = $all }; "
+        "($roots | Sort-Object CreationDate | Select-Object -First 1).ProcessId" % base
+    )
+    pid = _run_powershell_pid(script)
+    if pid:
+        return pid
+    # 退一步：找启动最早的那个。
+    script = (
+        "(Get-Process -Name '%s' -ErrorAction SilentlyContinue | "
+        "Sort-Object StartTime | Select-Object -First 1 -ExpandProperty Id)" % base
+    )
+    return _run_powershell_pid(script)
+
+
+def _run_powershell_pid(script: str) -> int:
+    try:
+        result = subprocess.run(
+            [powershell_exe(), "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, timeout=25,
+        )
+    except Exception:
+        return 0
+    try:
+        pid = int((result.stdout or "").strip())
+    except ValueError:
+        return 0
+    return pid if pid > 0 else 0
+
+
+def cmd_hana_pid(argv):
+    emit({"pid": find_process_by_name("HanaAgent.exe")})
+
+
 COMMANDS = {
     "probe": cmd_probe,
     "install": cmd_install,
+    "sync": cmd_sync,
     "gpu": cmd_gpu,
     "voice": cmd_voice,
+    "start": cmd_start,
+    "stop": cmd_stop,
+    "watch": cmd_watch,
+    "watch-stop": cmd_watch_stop,
+    "alive": cmd_alive,
+    "live": cmd_live,
+    "speak": cmd_speak,
+    "hana-pid": cmd_hana_pid,
 }
 
 
