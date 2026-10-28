@@ -485,7 +485,8 @@ async function loadKokoroStatus() {
 
     const canRun = !!body.installed;
     startBtn.hidden = !canRun || body.running;
-    stopBtn.hidden = !canRun || !body.running || body.foreign;
+    // 服务在跑就始终能停：换过安装路径时它在旧目录跑，但不能因此停不掉。
+    stopBtn.hidden = !body.running;
     autostopRow.hidden = !canRun;
     autostopToggle.checked = body.autoStop !== false;
 

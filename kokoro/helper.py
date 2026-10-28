@@ -9,6 +9,9 @@ App 进程受 Node 权限模型限制：只能读安装目录和自己的 app-da
 
 import json
 import os
+import re
+import shutil
+import subprocess
 import sys
 import urllib.request
 
@@ -16,6 +19,15 @@ PORT = int(os.environ.get("KOKORO_PORT", "8765"))
 MODEL_DIR = "models--hexgrad--Kokoro-82M-v1.1-zh"
 MODEL_FILE = "kokoro-v1_1-zh.pth"
 ACTIVE_PHASES = ("venv", "deps", "torch", "model", "verify")
+# 声音文件按需补下：换声音时只下这一个，放回 HF 缓存布局的 installed 快照里。
+VOICE_RE = re.compile(r"^[a-z]{2}_\d{3}$")
+VOICE_SOURCES = (
+    ("modelscope", "https://modelscope.cn/models/AI-ModelScope/Kokoro-82M-v1.1-zh/resolve/master/voices/%s.pt"),
+    ("hf-mirror", "https://hf-mirror.com/hexgrad/Kokoro-82M-v1.1-zh/resolve/main/voices/%s.pt"),
+    ("huggingface", "https://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh/resolve/main/voices/%s.pt"),
+)
+# 一个真的声音包约 523KB；小到这个数以下肯定是错误页/空文件。
+MIN_VOICE_BYTES = 100_000
 
 
 def emit(payload):
@@ -168,12 +180,160 @@ def cmd_probe(argv):
         "dirGB": dir_gb(root) if os.path.isdir(root) else None,
         "running": service["running"],
         "device": service["device"],
+        # 服务自己报的目录。换过安装路径后它和当前目录不一样，停止时要用它。
+        "serviceRoot": service["root"],
         "foreign": foreign,
     })
 
 
+def cmd_install(argv):
+    """把 App 数据目录里的 server.py / install.py 搬进安装目录，再起 install.py。
+
+    Node 进程读不到用户选的安装目录，只能把文件先放进自己的数据目录，
+    由这个助手（子进程，不受 Node 权限模型限制）搬过去并启动。
+    """
+    args, rest = parse_args(argv)
+    root = os.path.abspath(args.get("root") or ".")
+    app_dir = os.path.abspath(args.get("app-dir") or ".")
+    component = args.get("component") or ""
+    source = args.get("source") or "modelscope"
+    pip_source = args.get("pip-source") or "tuna"
+    torch_source = args.get("torch-source") or "nju"
+    voice = args.get("voice") or "zf_094"
+    if not VOICE_RE.match(voice):
+        voice = "zf_094"
+    if component not in ("model", "cpu", "gpu"):
+        fail("要指定下载模型、CPU 运行环境或 GPU 运行环境。")
+
+    os.makedirs(root, exist_ok=True)
+    for name in ("server.py", "install.py"):
+        source_file = os.path.join(app_dir, name)
+        if not os.path.isfile(source_file):
+            fail("缺少 %s，请重新加载 App 再试。" % name)
+        shutil.copy2(source_file, os.path.join(root, name))
+
+    log_dir = os.path.join(root, "tmp")
+    os.makedirs(log_dir, exist_ok=True)
+    log = open(os.path.join(log_dir, "install.log"), "a", encoding="utf-8")
+    command = [
+        sys.executable,
+        os.path.join(root, "install.py"),
+        "--root", root,
+        "--source", source,
+        "--pip-source", pip_source,
+        "--torch-source", torch_source,
+        "--component", component,
+        "--state-dir", app_dir,
+        "--voice", voice,
+    ]
+    flags = 0
+    if os.name == "nt":
+        flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+    process = subprocess.Popen(
+        command,
+        cwd=root,
+        stdout=log,
+        stderr=log,
+        creationflags=flags,
+        close_fds=True,
+    )
+    emit({"started": True, "pid": process.pid, "python": sys.executable})
+
+
+def cmd_gpu(argv):
+    """查这台电脑有没有 NVIDIA 显卡。用 nvidia-smi，不行再问系统。"""
+    system_root = os.environ.get("SystemRoot") or r"C:\Windows"
+    smi = os.path.join(system_root, "System32", "nvidia-smi.exe")
+    if os.path.isfile(smi):
+        try:
+            result = subprocess.run(
+                [smi, "--query-gpu=name", "--format=csv,noheader"],
+                capture_output=True, text=True, timeout=20,
+            )
+            if result.stdout and result.stdout.strip():
+                emit({"gpu": True})
+                return
+        except Exception:
+            pass
+    try:
+        shell = os.path.join(system_root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+        script = "Get-CimInstance Win32_VideoController | Where-Object { $_.Name -like '*NVIDIA*' } | Select-Object -First 1 -ExpandProperty Name"
+        result = subprocess.run(
+            [shell, "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, timeout=25,
+        )
+        if result.stdout and result.stdout.strip():
+            emit({"gpu": True})
+            return
+    except Exception:
+        pass
+    emit({"gpu": False})
+
+
+def voices_dir(root):
+    return os.path.join(root, "hf-cache", MODEL_DIR, "snapshots", "installed", "voices")
+
+
+def voice_path(root, voice):
+    return os.path.join(voices_dir(root), voice + ".pt")
+
+
+def fetch_voice(url, target, timeout=60):
+    """下一个声音文件：先写 .part，验过字节数再原子改名。失败不留残片。"""
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    part = target + ".part"
+    try:
+        request = urllib.request.Request(url, headers={"User-Agent": "hana-local-tts/1.0"})
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            with open(part, "wb") as handle:
+                shutil.copyfileobj(response, handle)
+        size = os.path.getsize(part)
+        if size < MIN_VOICE_BYTES:
+            raise RuntimeError("下到的文件太小（%d 字节），不像声音包" % size)
+        os.replace(part, target)
+        return size
+    finally:
+        if os.path.exists(part):
+            try:
+                os.remove(part)
+            except OSError:
+                pass
+
+
+def cmd_voice(argv):
+    """确保一个声音文件在本地。已在就直接返回；没有就按源顺序下一个。
+
+    Kokoro 服务跑在离线模式（HF_HUB_OFFLINE=1），它找声音文件就走 HF 缓存的
+    installed 快照。把文件放进那个目录，服务不用重启也能找到。
+    """
+    args, rest = parse_args(argv)
+    root = os.path.abspath(args.get("root") or (rest[0] if rest else "."))
+    voice = args.get("id") or args.get("voice") or (rest[1] if len(rest) > 1 else "")
+    if not VOICE_RE.match(voice or ""):
+        fail("声音名不对：%s" % (voice or "（空）"))
+    target = voice_path(root, voice)
+    if os.path.isfile(target):
+        emit({"ready": True, "voice": voice, "downloaded": False})
+        return
+    preferred = args.get("source") or ""
+    order = [item for item in VOICE_SOURCES if item[0] == preferred]
+    order += [item for item in VOICE_SOURCES if item[0] != preferred]
+    errors = []
+    for name, template in order:
+        try:
+            size = fetch_voice(template % voice, target)
+            emit({"ready": True, "voice": voice, "downloaded": True, "source": name, "bytes": size})
+            return
+        except Exception as error:  # noqa: BLE001 - 换下一个源再试
+            errors.append("%s：%s" % (name, error))
+    fail("声音文件没下成。" + "；".join(errors))
+
+
 COMMANDS = {
     "probe": cmd_probe,
+    "install": cmd_install,
+    "gpu": cmd_gpu,
+    "voice": cmd_voice,
 }
 
 

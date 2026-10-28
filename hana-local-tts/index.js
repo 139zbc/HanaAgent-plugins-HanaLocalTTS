@@ -6,7 +6,7 @@ import path from "node:path";
 import { defineApp } from "./sdk/app-contract/server-client.js";
 import { KOKORO_VOICES } from "./kokoro-voices.js";
 import { INSTALL_PY_B64, SERVER_PY_B64 } from "./kokoro-files.js";
-import { runHelper } from "./kokoro-runtime.js";
+import { runHelper, startInstall } from "./kokoro-runtime.js";
 
 export const name = "hana-local-tts";
 
@@ -241,7 +241,7 @@ function defaultKokoroRoot() {
 
 async function kokoroStatus(sdk) {
   const root = await kokoroRoot(sdk);
-  const result = { installed: false, modelReady: false, cpuReady: false, gpuReady: false, dirGB: null, running: false, foreign: false, device: "", path: root, defaultPath: defaultKokoroRoot(), autoStop: await autoStopEnabled(sdk), targetDevice: await kokoroDevice(sdk), probeFailed: false, probeError: "" };
+  const result = { installed: false, modelReady: false, cpuReady: false, gpuReady: false, dirGB: null, running: false, foreign: false, device: "", serviceRoot: "", path: root, defaultPath: defaultKokoroRoot(), autoStop: await autoStopEnabled(sdk), targetDevice: await kokoroDevice(sdk), probeFailed: false, probeError: "" };
   try {
     const parsed = await runHelper(sdk, sdk.dataDir, ["probe", "--root", root], { timeoutMs: 30000 });
     result.modelReady = parsed.model === true;
@@ -251,6 +251,7 @@ async function kokoroStatus(sdk) {
     result.running = parsed.running === true;
     result.foreign = parsed.foreign === true;
     if (typeof parsed.device === "string") result.device = parsed.device;
+    if (typeof parsed.serviceRoot === "string") result.serviceRoot = parsed.serviceRoot;
   } catch (error) {
     // 探测失败和“真的没装”是两回事，页面要分开说。
     result.probeFailed = true;
@@ -264,37 +265,12 @@ async function kokoroStatus(sdk) {
 
 // 只在用户点 GPU「下载」时查显卡。不在打开设置时查，避免 nvidia-smi 弹出命令行窗口。
 async function checkGpuHardware(sdk) {
-  const executable = await powershellPath(sdk);
-  if (!executable) return { ok: false, error: "找不到 Windows PowerShell。" };
-  const script = `
-$ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
-$smi = Join-Path (Join-Path $env:SystemRoot 'System32') 'nvidia-smi.exe'
-$found = $false
-if (Test-Path -LiteralPath $smi) {
-  $psi = New-Object System.Diagnostics.ProcessStartInfo
-  $psi.FileName = $smi
-  $psi.Arguments = '--query-gpu=name --format=csv,noheader'
-  $psi.RedirectStandardOutput = $true
-  $psi.RedirectStandardError = $true
-  $psi.UseShellExecute = $false
-  $psi.CreateNoWindow = $true
-  $proc = [Diagnostics.Process]::Start($psi)
-  $out = $proc.StandardOutput.ReadToEnd()
-  $proc.WaitForExit()
-  if ($out) { $found = $true }
-}
-if (-not $found) {
-  $gpus = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*NVIDIA*' })
-  if ($gpus.Count -gt 0) { $found = $true }
-}
-if ($found) { 'gpu-ok' } else { 'no-gpu' }
-`.trim();
   try {
-    const { stdout } = await runPowerShell(executable, script, 20000);
-    return String(stdout || "").includes("gpu-ok") ? { ok: true } : { ok: false, error: "这台电脑没有 NVIDIA 显卡。" };
+    const result = await runHelper(sdk, sdk.dataDir, ["gpu"], { timeoutMs: 45000 });
+    if (result && result.gpu === true) return { ok: true };
+    return { ok: false, error: "这台电脑没有 NVIDIA 显卡。" };
   } catch (error) {
-    return { ok: false, error: failureText(error) };
+    return { ok: false, error: failureText(error, "显卡检查失败") };
   }
 }
 
@@ -374,6 +350,38 @@ function kokoroVoiceId(value) {
   return typeof value === "string" && KOKORO_VOICE_IDS.has(value) ? value : KOKORO_DEFAULT_VOICE;
 }
 
+// 声音文件按需补下：换声音时只下那一个（约 0.5MB）。已经确认过的记在内存里，
+// 不重复问助手；合成失败时清掉，下次重新确认，声音文件被删了也能自愈。
+const readyVoices = new Set();
+
+// 装模型时带哪个声音：宿主多媒体里选的那个，读不到就用 App 自己存的、再读不到用默认。
+async function currentKokoroVoice(sdk) {
+  const host = await readHostSpeechPrefs(sdk);
+  if (host && host.kokoroVoice) return host.kokoroVoice;
+  const local = await readSpeechPrefs(sdk);
+  return local.kokoroVoice || KOKORO_DEFAULT_VOICE;
+}
+
+async function kokoroVoiceSource(sdk) {
+  try {
+    const all = await sdk.config.getAll();
+    const source = all && typeof all.kokoroSource === "string" ? all.kokoroSource : "";
+    return KOKORO_INSTALL_SOURCES[source] || "";
+  } catch {
+    return "";
+  }
+}
+
+async function ensureVoiceFile(sdk, root, voice) {
+  if (readyVoices.has(voice)) return;
+  const source = await kokoroVoiceSource(sdk);
+  const args = ["voice", "--root", root, "--id", voice];
+  if (source) args.push("--source", source);
+  await runHelper(sdk, sdk.dataDir, args, { timeoutMs: 120000 });
+  readyVoices.add(voice);
+  await sdk.logger.info(`kokoro voice ready: ${voice}`);
+}
+
 function kokoroScript(root, textFile, wavFile, voice, rate, play = true, device = "cpu") {
   const server = path.join(root, "server.py");
   const player = play
@@ -435,9 +443,13 @@ async function writeSpeechFile(sdk, text, voice, rate, wavFile, engine, play = t
     try {
       const kokoroVoice = kokoroVoiceId(voice);
       const root = await kokoroRoot(sdk);
+      // 换声音时只补下那一个声音文件；已经在本地就快速返回。
+      await ensureVoiceFile(sdk, root, kokoroVoice);
       try {
         await runPowerShell(executable, kokoroScript(root, textFile, wavFile, kokoroVoice, rate, play, await kokoroDevice(sdk)), 280000);
       } catch (error) {
+        // 声音文件可能被外面动了；下次重新确认一遍。
+        readyVoices.delete(kokoroVoice);
         error.kokoro = true;
         throw error;
       }
@@ -876,31 +888,16 @@ let installStartedAt = 0;
 
 async function readInstallState(sdk, root) {
   const state = { phase: "none", message: "", percent: null, error: null, component: "" };
-  const executable = await powershellPath(sdk);
-  if (!executable) return state;
-  const script = `
-$ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
-$p = Join-Path '${quotePs(root)}' 'install-state.json'
-if (Test-Path -LiteralPath $p) {
-  $text = [IO.File]::ReadAllText($p, [Text.Encoding]::UTF8)
-  [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($text))
-}
-`.trim();
+  // 安装进度由 install.py 镜像一份到 App 数据目录（Node 读不到安装目录）。
   try {
-    const { stdout } = await runPowerShell(executable, script, 15000);
-    // 只取最后一行纯 base64，避开 PowerShell 的 CLIXML 进度噪声
-    const b64 = String(stdout || "").trim().split(/\r?\n/).filter((line) => /^[A-Za-z0-9+/=]+$/.test(line.trim())).pop() || "";
-    if (b64) {
-      const text = Buffer.from(b64, "base64").toString("utf8");
-      const parsed = JSON.parse(text);
-      if (parsed) {
-        if (typeof parsed.phase === "string") state.phase = parsed.phase;
-        if (typeof parsed.message === "string") state.message = parsed.message;
-        if (typeof parsed.percent === "number") state.percent = parsed.percent;
-        if (typeof parsed.error === "string") state.error = parsed.error;
-        if (typeof parsed.component === "string") state.component = parsed.component;
-      }
+    const text = await readFile(path.join(sdk.dataDir, "install-state.json"), "utf8");
+    const parsed = JSON.parse(text);
+    if (parsed) {
+      if (typeof parsed.phase === "string") state.phase = parsed.phase;
+      if (typeof parsed.message === "string") state.message = parsed.message;
+      if (typeof parsed.percent === "number") state.percent = parsed.percent;
+      if (typeof parsed.error === "string") state.error = parsed.error;
+      if (typeof parsed.component === "string") state.component = parsed.component;
     }
   } catch {
     // 状态文件读不到就当没安装过
@@ -908,50 +905,7 @@ if (Test-Path -LiteralPath $p) {
   return state;
 }
 
-function python312Script() {
-  return `
-$base = ''
-$profileDir = [Environment]::GetFolderPath('UserProfile')
-if (-not $profileDir) { $profileDir = $env:USERPROFILE }
-$roots = New-Object System.Collections.Generic.List[string]
-foreach ($item in @($env:APPDATA, $env:LOCALAPPDATA, [Environment]::GetFolderPath('ApplicationData'))) {
-  if ($item) { [void]$roots.Add([string]$item) }
-}
-if ($profileDir) { [void]$roots.Add((Join-Path $profileDir 'AppData\\Roaming')) }
-foreach ($r in $roots) {
-  $uvRoot = Join-Path $r 'uv\\python'
-  if (-not (Test-Path -LiteralPath $uvRoot)) { continue }
-  $all = @(Get-ChildItem -LiteralPath $uvRoot -Directory -Filter 'cpython-3.12*' -ErrorAction SilentlyContinue |
-    Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'python.exe') })
-  if ($all.Count -eq 0) { continue }
-  $exact = @($all | Where-Object { $_.Name -match '^cpython-3\\.12\\.\\d' } | Sort-Object Name -Descending)
-  $pick = if ($exact.Count -gt 0) { $exact[0] } else { $all[0] }
-  $base = Join-Path $pick.FullName 'python.exe'
-  break
-}
-if (-not $base) {
-  $pyCmd = Get-Command py -ErrorAction SilentlyContinue
-  if ($pyCmd) {
-    $oldPreference = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    $listed = @(& py -0p 2>$null)
-    $ErrorActionPreference = $oldPreference
-    foreach ($row in $listed) {
-      if ([string]$row -notmatch '3\\.12') { continue }
-      $candidate = ([string]$row).Trim() -split '\\s+' | Select-Object -Last 1
-      if ($candidate -and (Test-Path -LiteralPath $candidate)) { $base = $candidate; break }
-    }
-  }
-}
-if (-not $base -or -not (Test-Path -LiteralPath $base)) {
-  $seen = ($roots | Select-Object -Unique) -join '; '
-  throw "找不到 Python 3.12。需要 3.12 的任意小版本（推荐用 uv 安装）。已查找：$seen"
-}
-Write-Output "python=[$base]"
-`.trim();
-}
-
-async function startKokoroInstall(sdk, root, source, pipSource, torchSource, component, workDir) {
+async function startKokoroInstall(sdk, root, source, pipSource, torchSource, component, workDir, voice) {
   // 同一时刻只允许一个下载。上一件已经完成或失败时，可以接着下另一件。
   if (installStartedAt && Date.now() - installStartedAt < 30 * 60 * 1000) {
     const current = await readInstallState(sdk, root);
@@ -959,48 +913,12 @@ async function startKokoroInstall(sdk, root, source, pipSource, torchSource, com
       throw new Error("已有一次下载在进行中，请等它完成或失败后重试。");
     }
   }
-  const executable = await powershellPath(sdk);
-  if (!executable) throw new Error("找不到 Windows PowerShell。");
   installStartedAt = Date.now();
   try {
-    // base64 太大，不能直接拼进命令行（会 ENAMETOOLONG），先写进 App 能写的临时目录
-    const b64Dir = path.join(workDir, "install-b64");
-    await mkdir(b64Dir, { recursive: true });
-    const serverB64File = path.join(b64Dir, "server.b64");
-    const installB64File = path.join(b64Dir, "install.b64");
-    await writeFile(serverB64File, SERVER_PY_B64, "utf8");
-    await writeFile(installB64File, INSTALL_PY_B64, "utf8");
-    const script = `
-$ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
-$root = '${quotePs(root)}'
-New-Item -ItemType Directory -Force -Path $root | Out-Null
-$diag = Join-Path $root 'tmp\\launch.log'
-try {
-  $serverB64 = (Get-Content -LiteralPath '${quotePs(serverB64File)}' -Raw).Trim()
-  $installB64 = (Get-Content -LiteralPath '${quotePs(installB64File)}' -Raw).Trim()
-  [IO.File]::WriteAllBytes((Join-Path $root 'server.py'), [Convert]::FromBase64String($serverB64))
-  [IO.File]::WriteAllBytes((Join-Path $root 'install.py'), [Convert]::FromBase64String($installB64))
-${python312Script()}
-  $installer = Join-Path $root 'install.py'
-  Start-Process -FilePath $base -ArgumentList @($installer, '--root', $root, '--source', '${quotePs(source)}', '--pip-source', '${quotePs(pipSource)}', '--torch-source', '${quotePs(torchSource)}', '--component', '${quotePs(component)}') -WorkingDirectory $root -WindowStyle Hidden
-  'ok'
-} catch {
-  $detail = ($_ | Out-String)
-  $nl = [Environment]::NewLine
-  $env1 = "APPDATA=[$env:APPDATA] USERPROFILE=[$env:USERPROFILE] LOCALAPPDATA=[$env:LOCALAPPDATA]"
-  $folder = [Environment]::GetFolderPath('ApplicationData')
-  $text = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')$nl$env1$nlApplicationData=[$folder]$nl$detail"
-  try {
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $diag) | Out-Null
-    [IO.File]::WriteAllText($diag, $text, (New-Object Text.UTF8Encoding $false))
-  } catch {}
-  throw $detail
-}
-`.trim();
-    const { stdout } = await runPowerShell(executable, script, 120000);
-    if (!String(stdout || "").includes("ok")) throw new Error("安装进程没有启动。");
-    await sdk.logger.info(`kokoro install started root=${root} source=${source} component=${component}`);
+    // Node 读不到用户选的安装目录，所以只把两份脚本放进 App 自己的数据目录，
+    // 再让 Python 助手搬过去并启动（助手是子进程，不受 Node 权限模型限制）。
+    const result = await startInstall(sdk, workDir, { root, component, source, pipSource, torchSource, voice });
+    await sdk.logger.info(`kokoro install started root=${root} source=${source} component=${component} python=${result && result.python ? result.python : "-"}`);
     return { ok: true };
   } catch (error) {
     installStartedAt = 0;
@@ -1145,10 +1063,11 @@ try {
   }
 }
 
-async function stopKokoroService(sdk) {
+async function stopKokoroService(sdk, rootOverride) {
   const executable = await powershellPath(sdk);
   if (!executable) throw new Error("找不到 Windows PowerShell。");
-  const root = await kokoroRoot(sdk);
+  // rootOverride：服务在别的目录跑的时候（比如换过安装路径），按它自己的目录找进程。
+  const root = rootOverride || (await kokoroRoot(sdk));
   const { stdout } = await runPowerShell(executable, kokoroStopScript(root), 30000);
   const b64 = String(stdout || "").trim().split(/\r?\n/).filter((line) => /^[A-Za-z0-9+/=]+$/.test(line.trim())).pop() || "";
   const stopped = b64 ? Buffer.from(b64, "base64").toString("utf8") : "none";
@@ -1304,6 +1223,15 @@ export default defineApp(async (sdk) => {
         }
         const root = cleanInstallPath(body && body.root) || (await kokoroRoot(sdk));
         await sdk.config.setMany({ kokoroRoot: root });
+        // 记住模型是从哪个源下的，换声音时补下声音文件优先用同一个源。
+        // 写不进去也不能拦下下载：记不住就用默认的源。
+        if (component === "model") {
+          try {
+            await sdk.config.setMany({ kokoroSource: source });
+          } catch (error) {
+            await sdk.logger.warn(`kokoro source not saved: ${errorDetail(error)}`);
+          }
+        }
         const status = await kokoroStatus(sdk);
         if (component === "model" && status.modelReady) return c.json({ ok: false, error: "模型已经具备。" }, 400);
         if (component === "cpu" && status.cpuReady) return c.json({ ok: false, error: "CPU 运行环境已经具备。" }, 400);
@@ -1312,7 +1240,8 @@ export default defineApp(async (sdk) => {
           const gpu = await checkGpuHardware(sdk);
           if (!gpu.ok) return c.json({ ok: false, error: gpu.error }, 400);
         }
-        const result = await startKokoroInstall(sdk, root, source, pipSource, torchSource, component, sdk.dataDir);
+        const installVoice = component === "model" ? await currentKokoroVoice(sdk) : "";
+        const result = await startKokoroInstall(sdk, root, source, pipSource, torchSource, component, sdk.dataDir, installVoice);
         return c.json(result);
       } catch (error) {
         await logRouteError(sdk, "kokoro install failed", error);
@@ -1330,13 +1259,28 @@ export default defineApp(async (sdk) => {
       const root = cleanInstallPath(body && body.root);
       if (!root) return c.json({ error: "路径要写完整盘符，例如 D:\\models\\kokoro。" }, 400);
       if (root.length > 160) return c.json({ error: "路径太长。" }, 400);
+      // 换目录前先把在跑的服务停掉：它占着 8765，而且加载的是旧目录里的模型。
+      let stopped = [];
+      try {
+        const status = await kokoroStatus(sdk);
+        if (status.running) {
+          const target = status.serviceRoot || (await kokoroRoot(sdk));
+          const result = await stopKokoroService(sdk, target);
+          stopped = result.stopped || [];
+          await sdk.logger.info(`kokoro stopped before path change: ${stopped.join(",") || "none"}`);
+        }
+      } catch (error) {
+        await sdk.logger.error(`kokoro stop before path change failed: ${failureText(error)}`);
+      }
       try {
         await sdk.config.setMany({ kokoroRoot: root });
       } catch (error) {
         return c.json({ error: failureText(error) }, 500);
       }
+      // 声音文件是按目录放的，换了目录要重新确认一遍。
+      readyVoices.clear();
       await sdk.logger.info(`kokoro root set to ${root}`);
-      return c.json({ ok: true, root });
+      return c.json({ ok: true, root, stopped });
     });
 
     app.post("/kokoro-start", async (c) => {
@@ -1346,6 +1290,10 @@ export default defineApp(async (sdk) => {
         if (status.targetDevice === "cuda" && !status.gpuReady) return c.json({ ok: false, error: "GPU 运行环境未下载。" }, 400);
         if (status.targetDevice !== "cuda" && !status.cpuReady) return c.json({ ok: false, error: "CPU 运行环境未下载。" }, 400);
         if (status.running && !status.foreign) return c.json({ ok: true, alreadyRunning: true });
+        if (status.running && status.foreign) {
+          // 另一个目录的服务占着 8765，先把它停掉再起自己的。
+          await stopKokoroService(sdk, status.serviceRoot || (await kokoroRoot(sdk)));
+        }
         const result = await startKokoroService(sdk);
         return c.json(result);
       } catch (error) {
@@ -1358,8 +1306,9 @@ export default defineApp(async (sdk) => {
       try {
         const status = await kokoroStatus(sdk);
         if (!status.running) return c.json({ ok: true, stopped: [] });
-        if (status.foreign) return c.json({ ok: false, error: "服务是从另一个目录启动的，不能在这里停。" }, 400);
-        const result = await stopKokoroService(sdk);
+        // 服务可能在另一个目录（换过安装路径）。按它自己报的目录停，不误伤别的。
+        const target = status.serviceRoot || (await kokoroRoot(sdk));
+        const result = await stopKokoroService(sdk, target);
         return c.json(result);
       } catch (error) {
         await logRouteError(sdk, "kokoro stop failed", error);

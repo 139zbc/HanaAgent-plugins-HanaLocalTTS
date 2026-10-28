@@ -131,14 +131,14 @@ function renderKokoro(state) {
   setValue(ui.device, '服务没运行时看不出', 'muted');
 }
 
-// 启停按钮：装了 Kokoro 才有。运行中显示停止，没运行显示启动；外来目录的服务停不了。
+// 启停按钮：服务在跑就给「停止」——哪怕运行环境还没装、哪怕它在另一个目录。
 function renderServiceButton(state) {
-  if (!state || !state.installed) {
+  if (!state || (!state.installed && !state.running)) {
     ui.serviceFoot.hidden = true;
     return;
   }
   ui.serviceFoot.hidden = false;
-  const running = state.running && !state.foreign;
+  const running = !!state.running;
   ui.serviceBtn.textContent = running ? '停止服务' : '启动服务';
   ui.serviceBtn.dataset.action = running ? 'stop' : 'start';
 }

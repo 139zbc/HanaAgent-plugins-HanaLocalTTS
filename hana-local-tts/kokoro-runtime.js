@@ -12,10 +12,11 @@
 
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
+import { readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { HELPER_PY_B64 } from "./kokoro-files.js";
+import { HELPER_PY_B64, INSTALL_PY_B64, SERVER_PY_B64 } from "./kokoro-files.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -115,21 +116,32 @@ async function pyLauncher(sdk, dataDir) {
 //   1. app-data 里自己下载的那份（读写都在允许范围内，最稳）
 //   2. C:\Windows\py.exe 按标签拉起机器上已有的 Python
 // 直接跑用户目录里的 python.exe 不行——那个路径 App 进程读不了。
-export async function findHelperPython(sdk, dataDir) {
+// require312 为真时只认 3.12（装依赖、跑服务要用）。
+export async function resolveInterpreter(sdk, dataDir, require312) {
   const attempts = [];
   const downloaded = path.join(dataDir, DOWNLOADED_DIR, "python.exe");
   if (safeExists(downloaded)) {
-    return { kind: "direct", command: downloaded, args: [], attempts };
+    const version = await pythonVersion(downloaded, [], dataDir);
+    if (!require312 || (version && version.major === 3 && version.minor === 12)) {
+      return { kind: "direct", command: downloaded, args: [], attempts };
+    }
+    attempts.push("app-data 里那份不是 3.12");
+  } else {
+    attempts.push("app-data 里没有 python");
   }
-  attempts.push("app-data 里没有 python");
 
   const { launcher, list } = await pyLauncher(sdk, dataDir);
   if (!launcher || !list.length) {
     attempts.push("py 启动器不可用或没有列出解释器");
     return { kind: "none", attempts };
   }
-  const preferred = list.find((item) => isVersion312(item.tag)) || list[0];
-  attempts.push(`py 启动器可用，候选 ${list.map((item) => item.tag).join(", ")}`);
+  const usable = require312 ? list.filter((item) => isVersion312(item.tag)) : list;
+  if (!usable.length) {
+    attempts.push("机器上没有 3.12");
+    return { kind: "none", attempts };
+  }
+  const preferred = usable.find((item) => isVersion312(item.tag)) || usable[0];
+  attempts.push(`用 py 启动器的 ${preferred.tag}`);
   return {
     kind: "launcher",
     command: launcher,
@@ -139,19 +151,13 @@ export async function findHelperPython(sdk, dataDir) {
   };
 }
 
+export async function findHelperPython(sdk, dataDir) {
+  return resolveInterpreter(sdk, dataDir, false);
+}
+
 // 找 3.12 专用的解释器（装依赖、跑服务都要它）。
 export async function findRuntimePython(sdk, dataDir) {
-  const helper = await findHelperPython(sdk, dataDir);
-  if (helper.kind === "none") return null;
-  if (helper.kind === "direct") {
-    const version = await pythonVersion(helper.command, helper.args, dataDir);
-    if (version && version.major === 3 && version.minor === 12) return { ...helper, version };
-    return null;
-  }
-  if (!isVersion312(helper.tag)) return null;
-  const version = await pythonVersion(helper.command, helper.args, dataDir);
-  if (version && version.major === 3 && version.minor === 12) return { ...helper, version };
-  return null;
+  return resolveInterpreter(sdk, dataDir, true);
 }
 
 export function parseVersion(text) {
@@ -177,7 +183,7 @@ async function pythonVersion(executable, prefixArgs, dataDir) {
 
 // 调助手的一个子命令，返回它打印的 JSON。
 export async function runHelper(sdk, dataDir, args, options = {}) {
-  const python = await findHelperPython(sdk, dataDir);
+  const python = await resolveInterpreter(sdk, dataDir, false);
   if (python.kind === "none") {
     throw new Error(`找不到能用的 Python（${python.attempts.join("；")}）。需要 3.8 以上，3.12 最稳。`);
   }
@@ -187,6 +193,50 @@ export async function runHelper(sdk, dataDir, args, options = {}) {
     dataDir,
     options.timeoutMs || 30000,
   );
+  return parseHelperOutput(stdout, stderr);
+}
+
+// 把 server.py / install.py 放进 App 数据目录，助手会搬到安装目录再跑。
+export async function writeAppSources(dataDir) {
+  for (const [name, b64] of [["server.py", SERVER_PY_B64], ["install.py", INSTALL_PY_B64]]) {
+    const target = path.join(dataDir, name);
+    const wanted = Buffer.from(b64, "base64");
+    try {
+      const current = await readFile(target);
+      if (current.equals(wanted)) continue;
+    } catch {
+      // 还没有这份文件，继续写。
+    }
+    await writeFile(target, wanted);
+  }
+}
+
+// 发起一次安装：Node 只把文件放进自己的数据目录并叫助手去跑。
+export async function startInstall(sdk, dataDir, options) {
+  await writeAppSources(dataDir);
+  const python = await resolveInterpreter(sdk, dataDir, true);
+  if (python.kind === "none") {
+    throw new Error(`找不到 Python 3.12（${python.attempts.join("；")}）。装依赖和跑服务都要 3.12。`);
+  }
+  const args = [
+    ...python.args,
+    "-c",
+    helperSource(),
+    "install",
+    "--root", options.root,
+    "--app-dir", dataDir,
+    "--component", options.component,
+    "--source", options.source,
+    "--pip-source", options.pipSource,
+    "--torch-source", options.torchSource,
+  ];
+  // 模型安装时带上当前选中的声音，只下那一个声音文件。
+  if (options.component === "model" && options.voice) args.push("--voice", options.voice);
+  const { stdout, stderr } = await runCommand(python.command, args, dataDir, 60000);
+  return parseHelperOutput(stdout, stderr);
+}
+
+function parseHelperOutput(stdout, stderr) {
   const lines = String(stdout || "").split(/\r?\n/).filter((line) => line.trim());
   if (!lines.length) {
     throw new Error(String(stderr || "").trim() || "助手没有返回结果。");
