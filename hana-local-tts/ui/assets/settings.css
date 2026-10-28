@@ -17,137 +17,23 @@ h2 {
   margin-bottom: 12px;
 }
 
-.hint {
-  font-size: var(--fs-caption, 12.5px);
-  line-height: 1.6;
-}
-
 /* 分组：标题在卡片外 */
 .group {
   display: grid;
   gap: 0;
 }
 
-/* 卡片：宿主设置页的表面样式。
-   圆角值和宿主一致（calc(var(--radius-card) + 2px)），并且用 corner-shape: squircle
-   —— 宿主就是这么画的。同样的 border-radius，squircle 视觉上比正圆更饱满，
-   用普通圆角会看着比宿主小一圈。 */
-.card {
-  display: grid;
-  padding: 2px 0;
-  border: var(--tts-border-width) solid var(--tts-card-border);
-  border-radius: var(--tts-card-radius);
-  corner-shape: squircle;
-  background: var(--tts-surface);
-  overflow: hidden;
-}
-
 .card > .hint {
   padding: 12px 16px 0;
 }
 
-/* 卡内条目：左文右控，垂直居中 */
-.row {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  padding: 12px 16px;
-  position: relative;
-}
-
-/* 卡内分隔线：两端缩进，跟宿主一致。
-   宿主用的是 height + background（不是 border-top），粗细取 --border-width。
-
-   不能写成「相邻兄弟」：每行下面都跟着一句错误提示（<p class="row-error">），
-   它夹在两行中间就把相邻关系打断了，分割线会整片消失（运行状态和安装路径之间
-   那条就是这么没的）。改成「卡内除第一项外都画线」，错误提示行本来就不是 .row，
-   不受影响。 */
-.card > .row::before,
-.card > .piece::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: var(--tts-divider-inset);
-  right: var(--tts-divider-inset);
-  height: var(--tts-border-width);
-  background: var(--tts-card-divider);
-}
-
-/* 每张卡的第一项不画线 */
-.card > .row:first-child::before,
-.card > .piece:first-child::before {
-  content: none;
-}
-
+/* 模型/CPU/GPU 这三块：里面各自带进度条和错误提示 */
 .piece { position: relative; }
 
 /* 只有控件的条目（安装、试一下合成）不需要左边距缩进 */
 .row:has(> .actions.only)::before {
   left: 0;
   right: 0;
-}
-
-.text {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.row-title {
-  /* 宿主行标题：--fs-body（0.9rem）/ 字重 400 */
-  font-size: var(--fs-body, 14.4px);
-  font-weight: var(--settings-label-weight, 400);
-  color: var(--tts-text);
-  line-height: 1.4;
-}
-
-.row-desc {
-  /* 宿主行说明：--fs-caption（0.78rem） */
-  font-size: var(--fs-caption, 12.5px);
-  color: var(--tts-text-2);
-  line-height: 1.45;
-  overflow-wrap: anywhere;
-}
-
-.row-desc.mono {
-  font-family: var(--font-mono, Consolas, monospace);
-  font-size: 11px;
-}
-
-/* 状态点：绿=正常，红=有问题，灰=不适用 */
-.row-desc[data-state="ok"]::before {
-  content: "●";
-  color: var(--tts-ok);
-  margin-right: 6px;
-  font-size: 9px;
-  vertical-align: 1px;
-}
-
-.row-desc[data-state="bad"]::before {
-  content: "●";
-  color: var(--tts-err);
-  margin-right: 6px;
-  font-size: 9px;
-  vertical-align: 1px;
-}
-
-.row-desc[data-state="loading"] {
-  color: var(--tts-text-2);
-}
-
-/* 右侧控件区 */
-.actions {
-  display: inline-flex;
-  gap: 8px;
-  align-items: center;
-  flex: 0 0 auto;
-  margin-left: auto;
-}
-
-.actions.only {
-  margin-left: 0;
 }
 
 /* 自动停止开关：跟宿主 .hana-toggle 一致，轨道开=accent、关=overlay-medium */
@@ -180,13 +66,13 @@ h2 {
   width: 14px;
   height: 14px;
   border-radius: var(--tts-toggle-thumb-radius);
-  background: #fff;
+  background: var(--on-accent, #fff);
   transition: transform 0.25s ease;
 }
 
 .switch input:checked + .slider { background: var(--tts-accent); }
 .switch input:checked + .slider::before { transform: translateX(16px); }
-.switch input:focus-visible + .slider { outline: 2px solid var(--tts-accent); outline-offset: 2px; }
+.switch input:focus-visible { outline: 2px solid var(--tts-accent); outline-offset: 2px; }
 .switch:has(input:disabled) { cursor: default; opacity: 0.55; }
 body.page-locked { cursor: wait; }
 body.page-locked button,
@@ -243,7 +129,7 @@ body.page-locked .tts-select-trigger { pointer-events: none; }
 }
 .tts-select-trigger:disabled { opacity: 0.55; cursor: default; }
 .tts-select-value {
-  flex: 1;
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -303,10 +189,3 @@ body.page-locked .tts-select-trigger { pointer-events: none; }
 .progress-fill { height: 100%; width: 0; background: var(--tts-ok); transition: width 0.5s; }
 
 .row-error { padding: 0 16px 12px; color: var(--tts-err); }
-
-/* 窄栏：控件换到下一行，避免挤压文字 */
-@media (max-width: 380px) {
-  .row { flex-wrap: wrap; gap: 10px; }
-  .actions { margin-left: 0; }
-  .row .text { flex-basis: 100%; }
-}

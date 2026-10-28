@@ -85,62 +85,117 @@ html, body {
 
 h1, h2, p { margin: 0; }
 
-/* ---- 一行一项：两个页面共用 ---- */
-
-.row {
+/* ---- 卡片：两个页面共用 ----
+   圆角、边框透明度、squircle 都跟宿主设置页一致。 */
+.card {
   display: grid;
-  gap: 10px;
-  align-items: baseline;
-  padding: 9px 0;
+  padding: 2px 0;
+  border: var(--tts-border-width) solid var(--tts-card-border);
+  border-radius: var(--tts-card-radius);
+  corner-shape: squircle;
+  background: var(--tts-surface);
+  overflow: hidden;
 }
 
-/* 面板：标签 + 值。设置页在 settings.css 里改成三列（多一个操作区）。 */
+/* ---- 卡内一行一项：两个页面共用 ----
+   结构是「标题在上、说明在下」，右边留一个控件区。 */
 .row {
-  grid-template-columns: minmax(64px, 84px) 1fr;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 16px;
+  position: relative;
 }
 
-/* 分隔线只由面板自己画（.panel 作用域内）。
-   设置页在 settings.css 里用伪元素画带缩进的线，
-   如果这里也画，两条规则叠加就会变成双线。 */
-.panel .row + .row {
-  border-top: var(--tts-border-width) solid var(--tts-divider);
+/* 卡内分隔线：两端缩进，跟宿主一致。
+   宿主用的是 height + background（不是 border-top），粗细取 --border-width。
+
+   不能写成「相邻兄弟」：每行下面都跟着一句错误提示（<p class="row-error">），
+   它夹在两行中间就把相邻关系打断了，分割线会整片消失。改成「卡内除第一项外都画线」，
+   错误提示行本来就不是 .row，不受影响。 */
+.card > .row::before,
+.card > .piece::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: var(--tts-divider-inset);
+  right: var(--tts-divider-inset);
+  height: var(--tts-border-width);
+  background: var(--tts-card-divider);
 }
 
-.label {
-  font-size: 12px;
+/* 每张卡的第一项不画线 */
+.card > .row:first-child::before,
+.card > .piece:first-child::before {
+  content: none;
+}
+
+.text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.row-title {
+  /* 宿主行标题：--fs-body（0.9rem）/ 字重 400 */
+  font-size: var(--fs-body, 14.4px);
+  font-weight: var(--settings-label-weight, 400);
+  color: var(--tts-text);
+  line-height: 1.4;
+}
+
+.row-desc {
+  /* 宿主行说明：--fs-caption（0.78rem） */
+  font-size: var(--fs-caption, 12.5px);
   color: var(--tts-text-2);
-}
-
-.value {
-  font-size: 13px;
-  text-align: right;
+  line-height: 1.45;
   overflow-wrap: anywhere;
 }
 
-.value[data-state="loading"] {
-  color: var(--tts-text-2);
+.row-desc.mono {
+  font-family: var(--font-mono, Consolas, monospace);
+  font-size: 11px;
 }
 
 /* 状态点：绿=正常，红=有问题，灰=不适用 */
-.value[data-state="ok"]::before,
-.value[data-state="bad"]::before,
-.value[data-state="muted"]::before {
+.row-desc[data-state="ok"]::before,
+.row-desc[data-state="bad"]::before,
+.row-desc[data-state="muted"]::before {
   content: "●";
   margin-right: 6px;
   font-size: 9px;
   vertical-align: 1px;
 }
 
-.value[data-state="ok"]::before { color: var(--tts-ok); }
-.value[data-state="bad"]::before { color: var(--tts-err); }
-.value[data-state="muted"]::before { color: var(--tts-text-2); }
+.row-desc[data-state="ok"]::before { color: var(--tts-ok); }
+.row-desc[data-state="bad"]::before { color: var(--tts-err); }
+.row-desc[data-state="muted"]::before { color: var(--tts-text-2); }
+
+.row-desc[data-state="loading"],
+.row-desc[data-state="muted"] {
+  color: var(--tts-text-2);
+}
+
+/* 右侧控件区 */
+.actions {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.actions.only {
+  margin-left: 0;
+}
 
 /* ---- 提示与结果 ---- */
 
 .hint {
   margin: 0;
-  padding: 0 2px;
-  font-size: 12px;
+  font-size: var(--fs-caption, 12.5px);
   line-height: 1.6;
   color: var(--tts-text-2);
 }
@@ -148,7 +203,7 @@ h1, h2, p { margin: 0; }
 .message {
   margin: 0;
   padding: 0 2px;
-  font-size: 12px;
+  font-size: var(--fs-caption, 12.5px);
   line-height: 1.6;
 }
 
@@ -228,4 +283,11 @@ select:focus, input[type="text"]:focus {
 
 input[type="text"].mono {
   font-family: var(--font-mono, Consolas, monospace);
+}
+
+/* 窄栏：控件换到下一行，避免挤压文字。两个页面同一套。 */
+@media (max-width: 380px) {
+  .row { flex-wrap: wrap; gap: 10px; }
+  .actions { margin-left: 0; }
+  .row .text { flex-basis: 100%; }
 }

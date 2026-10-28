@@ -2,31 +2,25 @@
 
 .panel {
   display: grid;
-  gap: 10px;
+  gap: 20px;
   box-sizing: border-box;
   max-width: 420px;
   padding: 16px;
 }
 
-.head h1 {
-  font-size: 15px;
+/* 面板自己的标题：和设置页的分组标题一个字号。 */
+.panel h1 {
+  font-size: var(--fs-title, 16px);
   font-weight: 600;
+  color: var(--tts-text);
+  margin-bottom: 4px;
 }
 
+/* 标题下面那行摘要 */
 .head .sub {
-  margin-top: 3px;
-  font-size: 12px;
+  font-size: var(--fs-caption, 12.5px);
   line-height: 1.5;
   color: var(--tts-text-2);
-}
-
-.card {
-  display: grid;
-  padding: 2px 12px;
-  border: 1px solid var(--tts-line);
-  border-radius: var(--tts-radius);
-  corner-shape: squircle;
-  background: var(--tts-surface);
 }
 
 /* 卡片底部的操作区 */
@@ -34,17 +28,17 @@
   display: flex;
   justify-content: flex-end;
   gap: 8px;
-  padding: 9px 0;
+  padding: 10px 16px 12px;
 }
 
 .card.error {
   gap: 8px;
-  padding: 10px 12px;
+  padding: 12px 16px;
   border-color: var(--tts-err);
 }
 
 .error-text {
-  font-size: 12px;
+  font-size: var(--fs-caption, 12.5px);
   line-height: 1.6;
   color: var(--tts-err);
 }

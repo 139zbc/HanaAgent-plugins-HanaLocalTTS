@@ -17,6 +17,8 @@
 
 机器上没有 Python 也能装：App 会自己下一个便携版 Python（3.12.16，和 uv 用的同款构建）到 app-data，装模型、建环境都用它。设置页多一行「Python 运行环境」，可以选用哪一份。
 
+卡片面板和设置页现在是一套视觉语言：同样的卡片、同样的行结构（标题在上、说明在下）、同样的分隔线和字号。
+
 本地模型装在 `D:\ProgramData\OH-WorkSpace\hanako\kokoro-zh`，不在这个 Git 仓库里。服务脚本的存档副本是 [kokoro/server.py](kokoro/server.py)。正在跑的那份在模型目录里，改脚本时两份要一起改。
 
 完整计划见 [PLAN.md](PLAN.md)。

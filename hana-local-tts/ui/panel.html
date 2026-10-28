@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>本地语音朗读</title>
-  <link rel="stylesheet" href="./assets/app.css?v=3">
-  <link rel="stylesheet" href="./assets/panel.css?v=4">
+  <link rel="stylesheet" href="./assets/app.css?v=4">
+  <link rel="stylesheet" href="./assets/panel.css?v=5">
 </head>
 <body>
   <main class="panel">
@@ -16,16 +16,22 @@
 
     <section class="card" id="panel-body">
       <div class="row">
-        <span class="label">朗读来源</span>
-        <span class="value" id="v-engine" data-state="loading">—</span>
+        <div class="text">
+          <span class="row-title">朗读来源</span>
+          <span class="row-desc" id="v-engine" data-state="loading">—</span>
+        </div>
       </div>
       <div class="row">
-        <span class="label">声音</span>
-        <span class="value" id="v-voice" data-state="loading">—</span>
+        <div class="text">
+          <span class="row-title">声音</span>
+          <span class="row-desc" id="v-voice" data-state="loading">—</span>
+        </div>
       </div>
       <div class="row">
-        <span class="label">语速</span>
-        <span class="value" id="v-rate" data-state="loading">—</span>
+        <div class="text">
+          <span class="row-title">语速</span>
+          <span class="row-desc" id="v-rate" data-state="loading">—</span>
+        </div>
       </div>
       <div class="foot">
         <button type="button" class="primary" id="btn-speak">试读一句</button>
@@ -34,12 +40,16 @@
 
     <section class="card">
       <div class="row">
-        <span class="label">本地 Kokoro</span>
-        <span class="value" id="v-kokoro" data-state="loading">—</span>
+        <div class="text">
+          <span class="row-title">本地 Kokoro</span>
+          <span class="row-desc" id="v-kokoro" data-state="loading">—</span>
+        </div>
       </div>
       <div class="row">
-        <span class="label">运行模式</span>
-        <span class="value" id="v-device" data-state="loading">—</span>
+        <div class="text">
+          <span class="row-title">运行模式</span>
+          <span class="row-desc" id="v-device" data-state="loading">—</span>
+        </div>
       </div>
       <div class="foot" id="service-foot" hidden>
         <button type="button" class="small" id="btn-service">启动服务</button>
@@ -61,6 +71,6 @@
       if (sub) sub.textContent = '页面没起来。请看 App 详情里的报错。';
     }, true);
   </script>
-  <script type="module" src="./assets/panel.js?v=4"></script>
+  <script type="module" src="./assets/panel.js?v=5"></script>
 </body>
 </html>
