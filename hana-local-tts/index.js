@@ -593,8 +593,16 @@ async function registerSpeechProvider(sdk) {
         const taskId = typeof params?.taskId === "string" && params.taskId ? params.taskId : name;
 
         if (segments.length === 1) {
-          await writeSpeechFile(sdk, segments[0], voice, speed, path.join(dir, name), engine);
+          // 单段也把播放放到后台。宿主给适配器 submit 的 RPC 只有 30 秒（APPS.md：普通 RPC
+          // 超时默认 30 秒），而播放要按音频的真实长度等：140 个字要放 27 秒，
+          // 同步等就必然超时，宿主会报「submit timed out」，用户只看到一句没头没尾的失败。
+          // 多段那条路早就是后台流水播放，这里跟它保持一致。
+          const firstFile = path.join(dir, name);
+          await writeSpeechFile(sdk, segments[0], voice, speed, firstFile, engine, false);
           await sdk.logger.info(`speech provider wrote ${name} (1 segment)`);
+          playRemainingSegments(sdk, dir, [], voice, speed, engine, 1, firstFile).catch(async (error) => {
+            await sdk.logger.error(`speech playback failed: ${failureText(error)}`);
+          });
           return { taskId, files: [name] };
         }
 

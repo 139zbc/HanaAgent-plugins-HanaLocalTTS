@@ -259,9 +259,10 @@ ui.speakBtn.addEventListener('click', async () => {
   setMessage('正在合成并朗读，第一次可能要等一会儿…', 'busy');
   try {
     const result = await postJson('speak', { text });
-    // 切了段时任务会在音频播完之前就完成，不能说「读完了」。
+    // 播放是后台做的，任务完成时音频还没放完，所以不能说「读完了」。
+    // 切了段就是后台流水播放，措辞再具体一点。
     const playing = Number(result.segments) > 1;
-    setMessage(playing ? '已开始朗读，分段播放中。' : '读完了。', 'ok');
+    setMessage(playing ? '已开始朗读，分段播放中。' : '已开始朗读。', 'ok');
   } catch (error) {
     setMessage(error instanceof Error ? error.message : '朗读失败。', 'bad');
   } finally {
