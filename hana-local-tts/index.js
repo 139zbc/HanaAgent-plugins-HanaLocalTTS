@@ -700,7 +700,31 @@ async function requestSpeech(sdk, text, speed) {
   }
 }
 
+// 合成之前按需把 Kokoro 服务拉起来。
+//
+// 为什么不能放在适配器的 submit 里：宿主回调 App 的普通 RPC 只有 30 秒，而
+// 冷启动要十几秒（加载模型），塞进去超时就报「submit timed out」，用户只看到
+// 一句没头没尾的失败。放在这里（App 自己的通道，媒体调用另有十分钟预算）就绕开了。
+//
+// 两个调用方都要走这一步：面板的 /speak 路由，和助手消息朗读的 synthesize()。
+// 合成本身只要三秒多，稳在 30 秒里。
+async function ensureKokoroReady(sdk) {
+  // 读不到宿主设置就不知道会不会用到 Kokoro：不动，交给适配器里的自动启动兜底。
+  const prefs = await readHostSpeechPrefs(sdk);
+  if (!prefs || prefs.engine !== "kokoro") return { started: false };
+  const live = await readKokoroLive(sdk);
+  if (live.running) return { started: false };
+  // 模型没装好就别起服务了：服务起不来要等 180 秒才报错，白等。
+  const status = await kokoroStatus(sdk);
+  if (!status.installed) return { started: false };
+  await sdk.logger.info("kokoro not running, starting before synthesis");
+  await startKokoroService(sdk);
+  await sdk.logger.info("kokoro started for synthesis");
+  return { started: true };
+}
+
 async function synthesize(sdk, text) {
+  await ensureKokoroReady(sdk);
   const result = await requestSpeech(sdk, text);
   const taskId = result?.tasks?.[0]?.taskId;
   if (!taskId) return textResult("宿主没有返回语音任务。");
@@ -971,6 +995,7 @@ export default defineApp(async (sdk) => {
     app.post("/probe", async (c) => {
       if (speechProviderError) return c.json({ ok: false, error: speechProviderError }, 500);
       try {
+        await ensureKokoroReady(sdk);
         const result = await requestSpeech(sdk, "Hana Agent 的本地语音朗读，正常。");
         const taskId = result?.tasks?.[0]?.taskId;
         if (!taskId) return c.json({ ok: false, error: "宿主没有返回语音任务。", result }, 500);
@@ -1004,6 +1029,9 @@ export default defineApp(async (sdk) => {
         return c.json({ ok: false, error: `这段太长了（约 ${chars} 字），上限 ${SPEAK_TEXT_MAX_CHARS} 字。` }, 400);
       }
       try {
+        // 冷启动挪到这里：合成之前先把服务拉起来，submit 里就只剩合成本身（三秒多），
+        // 不会撞上宿主给回调的 30 秒上限。
+        await ensureKokoroReady(sdk);
         const result = await requestSpeech(sdk, text);
         const tasks = Array.isArray(result?.tasks) ? result.tasks : [];
         const taskIds = tasks.map((item) => item?.taskId).filter((value) => typeof value === "string" && value);

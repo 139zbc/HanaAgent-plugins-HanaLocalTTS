@@ -298,6 +298,33 @@ method "submit" timed out — the app did not answer in time
 
 **踩过的坑**：① 改完插件光复制到 `~/.hanako/apps/` 不够——宿主进程还拿着旧的，得显式重载（`extension_manager` 的 `reload` 动作，本地目录安装的应用走的就是这条）。宿主日志里能看到 `plugin-loader-v2 ... v0.9.10 loaded`，重载前一直是 0.9.8。② 浏览器不能直连宿主路由，跨域会被拒（403 forbidden），本地端到端检查要起一层代理转发。③ 宿主重启后 `server-info.json` 里的 token 和 pid 都会变，之前抓的令牌会失效。
 
+### M16-3：冷启动也挪出 30 秒预算
+
+**起因**：M16-2 修好了「播放占满预算」这一半，但「冷启动占预算」这一半还在。实测：停掉服务后点朗读，助手 `cmd_speak` 会自己把服务拉起来（`start_service(..., wait=True)`，等上限 180 秒），而这 13.4 秒全发生在宿主回调 App 的 `submit` 里。合成 + 冷启动一起挤在 30 秒上限里，余量很薄。
+
+**做法**：新增 `ensureKokoroReady(sdk)`，在**调用 `requestSpeech` 之前**把服务拉起来。两个调用方都走这一步：
+- 面板的 `/speak` 路由
+- 助手消息朗读的 `synthesize()`（工具入口）
+- 设置页的 `/probe`（也走 `requestSpeech`）
+
+`submit` 里就只剩合成本身。
+
+**为什么挪到调用方就绕开了**：30 秒那个上限是「宿主回调 App 的普通 RPC」的时间（APPS.md 第 299 行），管的是 `submit` 这一次回调。App 自己的路由走的是另一条通道，而五个媒体调用的 App IPC 与总线预算另有十分钟。冷启动放在路由里，不占那 30 秒。
+
+**实测**（停服务后点朗读，从日志看时间线）：
+
+```
+18:52:48.155  kokoro not running, starting before synthesis   ← 冷启动开始
+18:52:58.059  kokoro started for synthesis                    ← 10 秒后服务就绪
+18:53:02.271  speech provider wrote ...wav (1 segment)         ← submit 内部只用了 4.3 秒
+```
+
+总耗时 20.4 秒（路由侧），而 `submit` 内部只剩 4.3 秒。服务在跑时：合成 2.9–3.7 秒，不受影响。
+
+**为什么之前那句「服务没起会报错」是错的**：助手 `cmd_speak` 里有 `if not state["running"]: state = start_service(root, device, wait=True)`，服务没跑它自己就拉起来了，所以停掉服务再点朗读不会报错，而是重新起服务、加载模型、再读出来。音色是记住的（宿主多媒体里的选择），模型权重是本地现成的，不重新下载——重的是进程和内存里的模型。
+
+**踩过的坑**：① `ensureKokoroReady` 要先看宿主设置（`readHostSpeechPrefs`）再用 Windows 系统语音时不该起 Kokoro。读不到宿主设置时不动，交给适配器里的自动启动兜底。② 模型没装好时别起服务：起不来要等 180 秒才报错，白等。③ 改代码时手滑写了两份 `ensureKokoroReady`，后定义的那份会把先前的覆盖掉（函数声明提升，后者胜），且两份逻辑不同——已删掉重复的那份。④ 冷启动在 Windows 上要 10 秒（不是 13.4 秒），13.4 秒是含「停服务后等它彻底死」的额外开销。
+
 ## 风险与代价清单
 
 | 风险 | 影响 | 对策 |
@@ -348,3 +375,4 @@ method "submit" timed out — the app did not answer in time
 - [x] M15-4 进度条报真进度（字节、速度、多久没动）+ 卡住快速失败
 - [x] M16 卡片面板加「试听」输入框（自由文本试读，替换「试读一句」）
 - [x] M16-2 单段朗读超时：播放也放后台，避开宿主 30 秒 RPC 上限
+- [x] M16-3 冷启动也挪出 30 秒预算：合成前先保证服务在跑
