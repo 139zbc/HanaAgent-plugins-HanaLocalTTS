@@ -195,7 +195,6 @@ const item = {
   compatibility: { minAppVersion: manifest.minAppVersion, formFactors: ["desktop"] },
   homepage: REPO_URL,
   repository: REPO_URL,
-  license: "Apache-2.0",
   categories: ["语音合成", "效率工具"],
   keywords: ["TTS", "朗读", "语音合成", "Kokoro", "离线", "Windows"],
   readme,

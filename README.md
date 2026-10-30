@@ -13,7 +13,6 @@
 | 磁盘占用 | 模型 314 MB + CPU 运行环境约 1.2 GB；装了 GPU 运行环境再加约 3.6 GB |
 | 内存占用 | 服务常驻约 1–2 GB |
 | 网络需求 | 只在安装期联网（下载 Python / 模型 / 依赖）。装好后朗读完全离线 |
-| 许可证 | Apache License 2.0（[官方全文](https://www.apache.org/licenses/LICENSE-2.0)） |
 
 仓库地址：`https://github.com/139zbc/HanaAgent-plugins-HanaLocalTTS`。
 
@@ -286,34 +285,7 @@ node hana-local-tts/scripts/smoke.mjs            # mock 宿主跑全部路由
 
 ---
 
-## 六、许可证
-
-本项目采用 Apache License 2.0 许可证（[官方全文](https://www.apache.org/licenses/LICENSE-2.0)）。仓库里的 `LICENSE` 文件暂时没有随包发布，发布前补上。
-
-```
-Copyright 2026 hana-local-tts contributors
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-```
-
-第三方组件：
-
-- 模型权重 [`hexgrad/Kokoro-82M-v1.1-zh`](https://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh)（Apache-2.0），ModelScope 镜像 `AI-ModelScope/Kokoro-82M-v1.1-zh`。
-- 推理框架 `kokoro`、`misaki`、`PyTorch`、`transformers` 等，各自遵循其上游许可证，安装时由 pip 带入。
-
----
-
-## 七、更新记录
+## 六、更新记录
 
 | 版本 | 改动 |
 | --- | --- |
