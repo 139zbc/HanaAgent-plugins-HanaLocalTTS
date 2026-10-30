@@ -9,3 +9,10 @@ dist-extensions/
 # 本地调试用的临时文件
 tmp-check/
 tmp-*/
+
+# README 的试听音频：发布时作为 Release 附件上传，不进 Git
+docs/sample/*.wav
+
+# 内部工作文件：不随仓库发布
+PLAN.md
+.hana/
