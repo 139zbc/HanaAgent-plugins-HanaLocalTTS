@@ -9,6 +9,23 @@
 </head>
 <body>
   <main>
+    <section class="group" id="setup-guide" hidden>
+      <h2>先做一件事</h2>
+      <div class="card">
+        <div class="row">
+          <div class="text">
+            <span class="row-title">选一个数据目录</span>
+            <span class="row-desc">模型和运行环境都放在这里，一共约 5G。点下面的按钮选一个本机文件夹，比如 D:\Models。App 会在里面建一个 hana-local-tts 子目录。路径要纯英文数字，不能有中文。</span>
+          </div>
+        </div>
+        <div class="row">
+          <span class="actions only">
+            <button id="guide-browse" type="button" class="primary">浏览</button>
+          </span>
+        </div>
+      </div>
+    </section>
+
     <p class="hint">朗读来源、声音和语速在 Hana 的「多媒体 → 语音合成 → 本地语音朗读」里设置。这里分开看模型、CPU 运行环境、GPU 运行环境。下载好就能用，没下载就点下载。同一时间只跑一套。</p>
 
     <section class="group">
@@ -181,6 +198,6 @@
       </div>
     </section>
   </main>
-  <script type="module" src="./assets/settings.js?v=15"></script>
+  <script type="module" src="./assets/settings.js?v=16"></script>
 </body>
 </html>

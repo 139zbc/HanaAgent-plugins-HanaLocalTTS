@@ -132,6 +132,12 @@ function renderPrefs(prefs) {
 
 function renderKokoro(state) {
   if (!state.installed) {
+    // 还没选数据目录：真正的原因是缺目录，不是缺模型。
+    if (state.needPath) {
+      setValue(ui.kokoro, '还没选数据目录', 'muted');
+      setValue(ui.device, '—', 'muted');
+      return;
+    }
     if (state.modelReady) setValue(ui.kokoro, '当前运行环境未下载', 'muted');
     else setValue(ui.kokoro, '模型未下载', 'muted');
     setValue(ui.device, '—', 'muted');
@@ -170,9 +176,13 @@ function renderHint(prefs, state) {
     lines.push('暂时读不到多媒体里的设置，这里显示的是本 App 存的旧值。');
   }
   if (state && !state.installed) {
-    lines.push(state.modelReady
-      ? '当前选的运行环境还是未下载。去这个 App 的设置里下载。'
-      : '模型还是未下载。去这个 App 的设置里下载。');
+    if (state.needPath) {
+      lines.push('还没选数据目录。去这个 App 的设置里点「浏览」选一个文件夹。');
+    } else {
+      lines.push(state.modelReady
+        ? '当前选的运行环境还是未下载。去这个 App 的设置里下载。'
+        : '模型还是未下载。去这个 App 的设置里下载。');
+    }
   }
   ui.hint.textContent = lines.join(' ');
   ui.hint.hidden = lines.length === 0;

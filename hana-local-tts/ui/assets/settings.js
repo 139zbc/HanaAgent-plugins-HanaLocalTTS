@@ -155,7 +155,9 @@ const downloadModel = document.getElementById("download-model");
 const downloadCpu = document.getElementById("download-cpu");
 const downloadGpu = document.getElementById("download-gpu");
 const savePath = document.getElementById("browse-path");
+const guideBrowse = document.getElementById("guide-browse");
 const hintPath = document.getElementById("hint-path");
+const setupGuide = document.getElementById("setup-guide");
 const errorSlots = {
   model: document.getElementById("error-model"),
   cpu: document.getElementById("error-cpu"),
@@ -513,9 +515,9 @@ stopBtn.addEventListener("click", async () => {
 });
 
 // 「浏览」：用宿主的原生文件夹选择器（和 Hana 设置页里那个是同一个对话框）。
-// 用户选的是父文件夹，App 会在里面建一个以插件命名的子目录。
-savePath.addEventListener("click", async () => {
-  savePath.disabled = true;
+// 用户选的是父文件夹，App 会在里面建一个以插件 id 命名的子目录。
+async function pickDataDir(button) {
+  button.disabled = true;
   showHint("");
   showError("", "path");
   try {
@@ -552,9 +554,20 @@ savePath.addEventListener("click", async () => {
       showError(message || "目录没有保存。", "path");
     }
   } finally {
-    savePath.disabled = false;
+    button.disabled = false;
   }
-});
+}
+
+savePath.addEventListener("click", () => pickDataDir(savePath));
+guideBrowse.addEventListener("click", () => pickDataDir(guideBrowse));
+
+// 还没选数据目录时，下载和启停都用不了：没地方放。
+// Python 运行环境不受影响——它装在 App 自己的数据目录里。
+function applyNeedPath(needPath) {
+  setupGuide.hidden = !needPath;
+  for (const select of [installSource, pipSource, torchSource]) select.disabled = needPath;
+  for (const button of [downloadModel, downloadCpu, downloadGpu, startBtn, stopBtn]) button.disabled = needPath;
+}
 
 function showHint(text) {
   hintPath.textContent = text || "";
@@ -640,6 +653,8 @@ async function loadKokoroStatus() {
     stopBtn.hidden = !body.running;
     autostopRow.hidden = !canRun;
     autostopToggle.checked = body.autoStop !== false;
+    // 还没选数据目录：先引导用户选一个，其余控件暂时用不了。
+    applyNeedPath(body.needPath === true);
 
     const stateResponse = await hana.api.fetch("kokoro-install");
     const state = await stateResponse.json().catch(() => ({}));
