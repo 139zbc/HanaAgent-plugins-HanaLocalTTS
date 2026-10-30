@@ -74,9 +74,6 @@ Kokoro 中文女声（`zf_094`）合成，24 kHz 单声道 WAV，约 10 秒：
 
 **[▶ 点这里试听 kokoro-zh-demo.wav](https://github.com/139zbc/HanaAgent-plugins-HanaLocalTTS/releases/latest/download/kokoro-zh-demo.wav)**
 
-> GitHub 会过滤 README 里的 `<audio>` 标签，所以这里用链接：点开后浏览器直接播放这段 WAV。
-> 音频文件在仓库的 `docs/sample/kokoro-zh-demo.wav`，发布时把它作为 Release 附件上传（文件名保持 `kokoro-zh-demo.wav`）即可，上面的链接用 `releases/latest/download` 指向最新版本的附件，不需要改。
-
 ---
 
 ## 三、插件向宿主申请的权限
