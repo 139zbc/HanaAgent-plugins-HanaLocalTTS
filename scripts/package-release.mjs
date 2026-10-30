@@ -23,7 +23,11 @@ function argValue(name, fallback) {
   return index >= 0 && args[index + 1] ? args[index + 1] : fallback;
 }
 
-const BASE_URL = argValue("--base-url", "https://github.com/OWNER/REPO/releases/download/v0.9.13");
+// 默认的下载地址跟着 manifest 的版本走，改版本号时不用再改这里。
+const manifest = JSON.parse(fs.readFileSync(path.join(pkgDir, "manifest.json"), "utf8"));
+const version = manifest.version;
+
+const BASE_URL = argValue("--base-url", `https://github.com/OWNER/REPO/releases/download/v${version}`);
 const PUBLISHER = argValue("--publisher", "hana-local-tts contributors");
 const REPO_URL = argValue("--repo-url", "https://github.com/OWNER/REPO");
 
@@ -150,8 +154,6 @@ async function loadMarketValidator() {
 
 // ---------------------------------------------------------------- 主流程
 
-const manifest = JSON.parse(fs.readFileSync(path.join(pkgDir, "manifest.json"), "utf8"));
-const version = manifest.version;
 const zipName = `app-${manifest.id}-${version}.zip`;
 const zipPath = path.join(outDir, zipName);
 
