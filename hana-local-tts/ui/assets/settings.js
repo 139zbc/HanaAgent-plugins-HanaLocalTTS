@@ -255,12 +255,15 @@ async function pollInstall() {
   }
 }
 
+let pathMissing = false;
+
 function setBusy(busy) {
-  for (const button of Object.values(downloadButtons)) button.disabled = busy;
+  const lockDownloads = busy || pathMissing;
+  for (const button of Object.values(downloadButtons)) button.disabled = lockDownloads;
+  installSource.disabled = lockDownloads;
+  pipSource.disabled = lockDownloads;
+  torchSource.disabled = lockDownloads;
   deviceSelect.disabled = busy;
-  installSource.disabled = busy;
-  pipSource.disabled = busy;
-  torchSource.disabled = busy;
   pythonSource.disabled = busy;
   sourceDress.sync();
   pipDress.sync();
@@ -564,9 +567,10 @@ guideBrowse.addEventListener("click", () => pickDataDir(guideBrowse));
 // 还没选数据目录时，下载和启停都用不了：没地方放。
 // Python 运行环境不受影响——它装在 App 自己的数据目录里。
 function applyNeedPath(needPath) {
-  setupGuide.hidden = !needPath;
-  for (const select of [installSource, pipSource, torchSource]) select.disabled = needPath;
-  for (const button of [downloadModel, downloadCpu, downloadGpu, startBtn, stopBtn]) button.disabled = needPath;
+  pathMissing = needPath === true;
+  setupGuide.hidden = !pathMissing;
+  for (const select of [installSource, pipSource, torchSource]) select.disabled = pathMissing;
+  for (const button of [downloadModel, downloadCpu, downloadGpu, startBtn, stopBtn]) button.disabled = pathMissing;
 }
 
 function showHint(text) {

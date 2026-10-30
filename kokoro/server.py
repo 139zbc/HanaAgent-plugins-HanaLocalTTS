@@ -116,6 +116,9 @@ class Handler(BaseHTTPRequestHandler):
         if not text:
             self.send_error(400, "empty input")
             return
+        if len(text) > 2000:
+            self.send_error(400, "text too long")
+            return
         voice = str(data.get("voice") or DEFAULT_VOICE)
         if not voice.replace("_", "").isalnum():
             self.send_error(400, "bad voice")
@@ -130,7 +133,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             with INFERENCE_LOCK:
                 chunks = []
-                for _graphemes, _phonemes, audio in PIPELINE(text[:2000], voice=voice, speed=speed):
+                for _graphemes, _phonemes, audio in PIPELINE(text, voice=voice, speed=speed):
                     chunks.append(audio)
                 if not chunks:
                     payload = b""

@@ -52,6 +52,48 @@ PROGRESS_HIGH = 0.0
 # Windows 会给它新开一个黑色控制台窗口——下载时弹窗就是这么来的。
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 NO_WINDOW = {"creationflags": CREATE_NO_WINDOW} if os.name == "nt" else {}
+INSTALL_LOCK_NAME = "install.lock"
+
+
+def install_lock_path(root: Path) -> Path:
+    return root / INSTALL_LOCK_NAME
+
+
+def release_install_lock(root: Path) -> None:
+    """只清自己的锁。别的安装进程写进去的 pid 不动。"""
+    path = install_lock_path(root)
+    try:
+        owner = int((path.read_text(encoding="utf-8") or "0").strip() or "0")
+    except (OSError, ValueError):
+        return
+    if owner != os.getpid():
+        return
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def stop_child(proc: subprocess.Popen) -> None:
+    """杀掉子进程并等它退出。不等的话，重试会和还没死的 pip 一起写环境。"""
+    if proc.poll() is not None:
+        return
+    proc.kill()
+    try:
+        proc.wait(timeout=30)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+            capture_output=True, text=True, timeout=30,
+            **NO_WINDOW,
+        )
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def write_state(root: Path, phase: str, message: str, percent: float | None = None, error: str | None = None):
@@ -430,8 +472,8 @@ def run_live(
                 if now - last_byte_at > 2:
                     speed = 0.0
                 if stall_seconds and (downloading or total_bytes) and now - last_byte_at > stall_seconds:
-                    # 多久没有一个字节进来：真的卡住了。杀掉重试，别让用户干等。
-                    proc.kill()
+                    # 多久没有一个字节进来：真的卡住了。先等这个进程退出，再让上层重试。
+                    stop_child(proc)
                     raise RuntimeError(
                         "下载卡住了：%d 秒没有新进度（当前在 %s）" % (stall_seconds, current_name or "下载")
                     )
@@ -446,7 +488,7 @@ def run_live(
                 installed_bytes = written
                 publish(shown, detail)
         if time.monotonic() - started > timeout:
-            proc.kill()
+            stop_child(proc)
             raise RuntimeError("超时")
         try:
             item = lines.get(timeout=1)
@@ -825,6 +867,8 @@ def main() -> None:
     except Exception as error:  # noqa: BLE001 - 失败原因要写给 UI
         write_state(root, "failed", f"安装失败：{error}", None, str(error))
         raise
+    finally:
+        release_install_lock(root)
 
 
 if __name__ == "__main__":

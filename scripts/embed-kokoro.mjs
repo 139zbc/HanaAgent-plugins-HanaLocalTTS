@@ -4,7 +4,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 
 const b64 = (p) => Buffer.from(readFileSync(p)).toString("base64");
 const out = [
-  "// 由 kokoro/server.py 和 kokoro/install.py 生成；改那两个文件后重新生成。",
+  "// 由 kokoro/server.py、kokoro/install.py 和 kokoro/helper.py 生成；改那三个文件后重新生成。",
   "// 生成命令：node scripts/embed-kokoro.mjs",
   `export const SERVER_PY_B64 = '${b64("kokoro/server.py")}';`,
   `export const INSTALL_PY_B64 = '${b64("kokoro/install.py")}';`,

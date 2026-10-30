@@ -638,6 +638,7 @@ function speechModelSnapshot() {
 
 // 正在朗读。第二次点不排队，直接拒绝，避免卡在宿主 30 秒超时里。
 let speechBusy = false;
+let speechSegmentCount = 0;
 let playbackState = { id: 0, state: "idle", message: "" };
 
 function beginPlayback() {
@@ -692,6 +693,7 @@ async function registerSpeechProvider(sdk) {
 
         const segments = splitIntoSegments(text);
         if (segments.length === 0) throw new Error("speech synthesis requires non-empty text");
+        speechSegmentCount = segments.length;
         claimSpeech();
         let playbackStarted = false;
         try {
@@ -839,8 +841,6 @@ async function synthesize(sdk, text) {
 const KOKORO_INSTALL_SOURCES = { modelscope: "modelscope", "hf-mirror": "hf-mirror", huggingface: "huggingface" };
 const KOKORO_PIP_SOURCES = { tuna: "tuna", aliyun: "aliyun", pypi: "pypi" };
 const KOKORO_TORCH_SOURCES = { pytorch: "pytorch", nju: "nju" };
-let installStartedAt = 0;
-
 async function readInstallState(sdk, root) {
   const state = { phase: "none", message: "", percent: null, error: null, component: "" };
   // 安装进度由 install.py 镜像一份到 App 数据目录（Node 读不到安装目录）。
@@ -861,24 +861,12 @@ async function readInstallState(sdk, root) {
 }
 
 async function startKokoroInstall(sdk, root, source, pipSource, torchSource, component, workDir, voice) {
-  // 同一时刻只允许一个下载。上一件已经完成或失败时，可以接着下另一件。
-  if (installStartedAt && Date.now() - installStartedAt < 30 * 60 * 1000) {
-    const current = await readInstallState(sdk, root);
-    if (current.phase !== "done" && current.phase !== "failed" && current.phase !== "none") {
-      throw new Error("已有一次下载在进行中，请等它完成或失败后重试。");
-    }
-  }
-  installStartedAt = Date.now();
-  try {
-    // Node 读不到用户选的安装目录，所以只把两份脚本放进 App 自己的数据目录，
-    // 再让 Python 助手搬过去并启动（助手是子进程，不受 Node 权限模型限制）。
-    const result = await startInstall(sdk, workDir, { root, component, source, pipSource, torchSource, voice, pythonSource: await pythonSource(sdk) });
-    await sdk.logger.info(`kokoro install started root=${root} source=${source} component=${component} python=${result && result.python ? result.python : "-"}`);
-    return { ok: true };
-  } catch (error) {
-    installStartedAt = 0;
-    throw error;
-  }
+  // 同一时刻只允许一个下载。锁在数据目录的 install.lock 里，App 重载后仍然有效。
+  // Node 读不到用户选的安装目录，所以只把脚本放进自己的数据目录，
+  // 再让 Python 助手搬过去并启动（助手是子进程，不受 Node 权限模型限制）。
+  const result = await startInstall(sdk, workDir, { root, component, source, pipSource, torchSource, voice, pythonSource: await pythonSource(sdk) });
+  await sdk.logger.info(`kokoro install started root=${root} source=${source} component=${component} python=${result && result.python ? result.python : "-"}`);
+  return { ok: true };
 }
 
 let watcherRunning = false;
@@ -1255,7 +1243,7 @@ export default defineApp(async (sdk) => {
           status: completed ? "done" : "failed",
           // 切了段时任务会在音频播完之前就完成，页面要据此换一句提示。
           // 依据是适配器内部的分段数：切了段就是后台流水播放，任务先返回、音频后放完。
-          segments: splitIntoSegments(text).length,
+          segments: speechSegmentCount,
           playbackId: playbackState.id,
         }, completed ? 200 : 500);
       } catch (error) {

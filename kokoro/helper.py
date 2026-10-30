@@ -214,7 +214,7 @@ def open_local(request, timeout):
     return opener.open(request, timeout=timeout)
 
 
-def service_state():
+def service_state() -> dict:
     try:
         with open_local("http://127.0.0.1:%d/health" % PORT, 2) as response:
             body = json.loads(response.read().decode("utf-8"))
@@ -655,6 +655,72 @@ def cmd_sync(argv):
     emit({"synced": copied, "root": root})
 
 
+INSTALL_LOCK_NAME = "install.lock"
+LOG_ROTATE_BYTES = 2 * 1024 * 1024
+
+
+def install_lock_path(root):
+    return os.path.join(root, INSTALL_LOCK_NAME)
+
+
+def read_lock_pid(path):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return int((handle.read() or "0").strip() or 0)
+    except (OSError, ValueError):
+        return 0
+
+
+def claim_install_lock(root):
+    """独占这次安装。锁里的 pid 还活着就拒绝。pid 不在了就清掉，允许重来。"""
+    path = install_lock_path(root)
+    if os.path.isfile(path):
+        owner = read_lock_pid(path)
+        if owner and pid_alive(owner):
+            return False
+        try:
+            os.remove(path)
+        except OSError:
+            return False
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return False
+    try:
+        os.write(fd, b"0")
+    finally:
+        os.close(fd)
+    return True
+
+
+def publish_install_lock(root, pid):
+    with open(install_lock_path(root), "w", encoding="utf-8") as handle:
+        handle.write(str(pid))
+
+
+def release_install_lock_if_placeholder(root):
+    path = install_lock_path(root)
+    if read_lock_pid(path) != 0:
+        return
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def rotate_log(path):
+    """超过 2MB 就换成新文件，只留一份旧的。"""
+    try:
+        if not os.path.isfile(path) or os.path.getsize(path) < LOG_ROTATE_BYTES:
+            return
+        previous = path + ".1"
+        if os.path.isfile(previous):
+            os.remove(previous)
+        os.replace(path, previous)
+    except OSError:
+        pass
+
+
 def cmd_install(argv):
     """把 App 数据目录里的 server.py / install.py 搬进安装目录，再起 install.py。
 
@@ -680,6 +746,8 @@ def cmd_install(argv):
         if not os.path.isfile(source_file):
             fail("缺少 %s，请重新加载 App 再试。" % name)
         shutil.copy2(source_file, os.path.join(root, name))
+    if not claim_install_lock(root):
+        fail("已有一次下载在进行中，请等它完成或失败后重试。")
 
     log_dir = os.path.join(root, "tmp")
     os.makedirs(log_dir, exist_ok=True)
@@ -699,14 +767,22 @@ def cmd_install(argv):
     if os.name == "nt":
         # CREATE_NO_WINDOW：不给它控制台，下载时不会闪黑窗口。
         flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
-    process = subprocess.Popen(
-        command,
-        cwd=root,
-        stdout=log,
-        stderr=log,
-        creationflags=flags,
-        close_fds=True,
-    )
+    process = None
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=root,
+            stdout=log,
+            stderr=log,
+            creationflags=flags,
+            close_fds=True,
+        )
+        publish_install_lock(root, process.pid)
+    except Exception as error:
+        if process is not None and process.poll() is None:
+            process.kill()
+        release_install_lock_if_placeholder(root)
+        fail("安装没有启动：%s" % error)
     emit({"started": True, "pid": process.pid, "python": sys.executable})
 
 
@@ -811,21 +887,6 @@ def venv_python(root: str, device: str) -> str:
         if os.path.isfile(candidate):
             return candidate
     return ""
-
-
-def service_state() -> dict:
-    try:
-        with open_local("http://127.0.0.1:%d/health" % PORT, 2) as response:
-            body = json.loads(response.read().decode("utf-8"))
-    except Exception:
-        return {"running": False, "device": "", "root": ""}
-    if not isinstance(body, dict):
-        return {"running": False, "device": "", "root": ""}
-    return {
-        "running": True,
-        "device": str(body.get("device") or ""),
-        "root": str(body.get("root") or ""),
-    }
 
 
 def pid_alive(pid: int) -> bool:
@@ -1128,8 +1189,12 @@ def start_service(root: str, device: str, wait: bool = True, temp_dir: str = "",
     model = os.path.join(root, "hf-cache", MODEL_DIR, "snapshots", "installed", MODEL_FILE)
     if os.path.isfile(model):
         env["HF_HUB_OFFLINE"] = "1"
-    out = open(os.path.join(tmp, "server.log"), "a", encoding="utf-8")
-    err = open(os.path.join(tmp, "server.err"), "a", encoding="utf-8")
+    log_path = os.path.join(tmp, "server.log")
+    err_path = os.path.join(tmp, "server.err")
+    rotate_log(log_path)
+    rotate_log(err_path)
+    out = open(log_path, "a", encoding="utf-8")
+    err = open(err_path, "a", encoding="utf-8")
     flags = 0
     if os.name == "nt":
         # CREATE_NO_WINDOW：服务不能弹控制台。DETACHED_PROCESS 会给它单开一个

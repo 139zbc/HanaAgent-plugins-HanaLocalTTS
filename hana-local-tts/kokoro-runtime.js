@@ -21,7 +21,6 @@ import { HELPER_PY_B64, INSTALL_PY_B64, SERVER_PY_B64 } from "./kokoro-files.js"
 
 const execFileAsync = promisify(execFile);
 
-export const PYTHON_VERSION = "3.12.14";
 export const DOWNLOADED_DIR = "python";
 const PY_LAUNCHER = "C:\\Windows\\py.exe";
 
@@ -48,16 +47,17 @@ let pythonDownloadClaimed = false;
 export function childEnv(dataDir) {
   const home = os.homedir();
   const tmp = path.join(dataDir, "tmp");
+  // 只传这几项。当前进程里的令牌和其他变量不要带给 Python、pip、curl。
   return {
-    ...process.env,
     SystemRoot: process.env.SystemRoot || "C:\\Windows",
     PATH: process.env.PATH || "",
-    HOME: home,
-    USERPROFILE: home,
-    APPDATA: path.join(home, "AppData", "Roaming"),
-    LOCALAPPDATA: path.join(home, "AppData", "Local"),
+    PATHEXT: process.env.PATHEXT || ".COM;.EXE;.BAT;.CMD",
     TEMP: tmp,
     TMP: tmp,
+    USERPROFILE: home,
+    HOME: home,
+    APPDATA: path.join(home, "AppData", "Roaming"),
+    LOCALAPPDATA: path.join(home, "AppData", "Local"),
     PYTHONIOENCODING: "utf-8",
     PYTHONUTF8: "1",
   };
