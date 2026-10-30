@@ -619,6 +619,18 @@ function speechModelSnapshot() {
   };
 }
 
+// 正在朗读。第二次点不排队，直接拒绝，避免卡在宿主 30 秒超时里。
+let speechBusy = false;
+
+function claimSpeech() {
+  if (speechBusy) throw new Error("正在朗读，等这一段结束再试。");
+  speechBusy = true;
+}
+
+function releaseSpeech() {
+  speechBusy = false;
+}
+
 async function registerSpeechProvider(sdk) {
   speechProviderError = "";
   try {
@@ -647,33 +659,25 @@ async function registerSpeechProvider(sdk) {
 
         const segments = splitIntoSegments(text);
         if (segments.length === 0) throw new Error("speech synthesis requires non-empty text");
-        const name = `speech-${randomBytes(8).toString("hex")}.wav`;
-        const taskId = typeof params?.taskId === "string" && params.taskId ? params.taskId : name;
-
-        if (segments.length === 1) {
-          // 单段也把播放放到后台。宿主给适配器 submit 的 RPC 只有 30 秒（APPS.md：普通 RPC
-          // 超时默认 30 秒），而播放要按音频的真实长度等：140 个字要放 27 秒，
-          // 同步等就必然超时，宿主会报「submit timed out」，用户只看到一句没头没尾的失败。
-          // 多段那条路早就是后台流水播放，这里跟它保持一致。
+        claimSpeech();
+        let playbackStarted = false;
+        try {
+          const name = `speech-${randomBytes(8).toString("hex")}.wav`;
+          const taskId = typeof params?.taskId === "string" && params.taskId ? params.taskId : name;
           const firstFile = path.join(dir, name);
+          const rest = segments.slice(1);
           await writeSpeechFile(sdk, segments[0], voice, speed, firstFile, engine, false);
-          await sdk.logger.info(`speech provider wrote ${name} (1 segment)`);
-          playRemainingSegments(sdk, dir, [], voice, speed, engine, 1, firstFile).catch(async (error) => {
+          await sdk.logger.info(`speech provider wrote ${name} (1/${segments.length} segments, ${rest.length} queued)`);
+          playbackStarted = true;
+          // 播放放后台，但占用一直留到播完。这期间再点朗读会被拒绝。
+          playRemainingSegments(sdk, dir, rest, voice, speed, engine, segments.length, firstFile).catch(async (error) => {
             await sdk.logger.error(`speech playback failed: ${failureText(error)}`);
-          });
+          }).finally(releaseSpeech);
           return { taskId, files: [name] };
+        } catch (error) {
+          if (!playbackStarted) releaseSpeech();
+          throw error;
         }
-
-        // 多段：第一段合到返回文件（不播），立刻把第二段的合成发出去，再播第一段。
-        // 这样宿主拿到音频的同时，后台已经在准备下一段，段间只差播放启动开销。
-        const firstFile = path.join(dir, name);
-        await writeSpeechFile(sdk, segments[0], voice, speed, firstFile, engine, false);
-        const rest = segments.slice(1);
-        await sdk.logger.info(`speech provider wrote ${name} (1/${segments.length} segments, ${rest.length} queued)`);
-        playRemainingSegments(sdk, dir, rest, voice, speed, engine, segments.length, firstFile).catch(async (error) => {
-          await sdk.logger.error(`speech segments failed: ${failureText(error)}`);
-        });
-        return { taskId, files: [name] };
       },
     });
     await sdk.media.registerCapabilitySource(PROVIDER_ID, {

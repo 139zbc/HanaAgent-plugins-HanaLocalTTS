@@ -55,6 +55,8 @@ def build_pipeline():
 
 
 PIPELINE = build_pipeline()
+# 同一时刻只跑一路推理。锁住整段合成，不包括后面把音频写出去。
+INFERENCE_LOCK = threading.Lock()
 
 
 def token_ok(header_value):
@@ -124,21 +126,26 @@ class Handler(BaseHTTPRequestHandler):
             speed = 1
         speed = min(2, max(0.5, speed))
         print(f"speech voice={voice} speed={speed} chars={len(text)}", flush=True)
+        payload = b""
         try:
-            chunks = []
-            for _graphemes, _phonemes, audio in PIPELINE(text[:2000], voice=voice, speed=speed):
-                chunks.append(audio)
+            with INFERENCE_LOCK:
+                chunks = []
+                for _graphemes, _phonemes, audio in PIPELINE(text[:2000], voice=voice, speed=speed):
+                    chunks.append(audio)
+                if not chunks:
+                    payload = b""
+                else:
+                    wav = torch.cat(chunks).numpy()
+                    buffer = io.BytesIO()
+                    sf.write(buffer, wav, 24000, format="WAV")
+                    payload = buffer.getvalue()
         except Exception as error:
             print(f"speech failed: {error}", flush=True)
             self.send_error(500, "voice failed")
             return
-        if not chunks:
+        if not payload:
             self.send_error(500, "no audio")
             return
-        wav = torch.cat(chunks).numpy()
-        buffer = io.BytesIO()
-        sf.write(buffer, wav, 24000, format="WAV")
-        payload = buffer.getvalue()
         self.send_response(200)
         self.send_header("Content-Type", "audio/wav")
         self.send_header("Content-Length", str(len(payload)))

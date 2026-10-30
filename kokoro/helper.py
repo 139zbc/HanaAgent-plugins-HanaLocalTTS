@@ -149,9 +149,15 @@ def torch_version(venv):
     return ""
 
 
+def open_local(request, timeout):
+    """访问本机服务时不走系统代理。代理把 127.0.0.1 转走时，健康检查会一直失败。"""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return opener.open(request, timeout=timeout)
+
+
 def service_state():
     try:
-        with urllib.request.urlopen("http://127.0.0.1:%d/health" % PORT, timeout=2) as response:
+        with open_local("http://127.0.0.1:%d/health" % PORT, 2) as response:
             body = json.loads(response.read().decode("utf-8"))
     except Exception:
         return {"running": False, "device": "", "root": ""}
@@ -652,7 +658,7 @@ def venv_python(root: str, device: str) -> str:
 
 def service_state() -> dict:
     try:
-        with urllib.request.urlopen("http://127.0.0.1:%d/health" % PORT, timeout=2) as response:
+        with open_local("http://127.0.0.1:%d/health" % PORT, 2) as response:
             body = json.loads(response.read().decode("utf-8"))
     except Exception:
         return {"running": False, "device": "", "root": ""}
@@ -721,20 +727,37 @@ def command_line_is_server(command_line: str, root: str) -> bool:
         start = index + 1
 
 
-def python_processes() -> list:
-    """本机 python.exe 的 pid 和完整命令行。匹配放在 Python 里做，不把目录拼进脚本。"""
-    script = (
-        "Get-CimInstance Win32_Process -Filter \"Name = 'python.exe'\" -ErrorAction SilentlyContinue "
-        "| Select-Object ProcessId, CommandLine | ConvertTo-Json -Compress"
-    )
+def capture_text(args, timeout: int) -> str:
+    """读子进程输出。不用 text=True，避免系统编码对不上时读线程抛错、结果变空。"""
     try:
-        result = subprocess.run(
-            [powershell_exe(), "-NoProfile", "-NonInteractive", "-Command", script],
-            capture_output=True, text=True, timeout=30,
-        )
+        result = subprocess.run(args, capture_output=True, timeout=timeout)
     except Exception:
-        return []
-    raw = (result.stdout or "").strip()
+        return ""
+    data = result.stdout or b""
+    if data.startswith(b"\xff\xfe") or (len(data) >= 8 and data[1] == 0 and data[3] == 0 and data[5] == 0):
+        return data.decode("utf-16-le", errors="replace")
+    if data.startswith(b"\xfe\xff"):
+        return data.decode("utf-16-be", errors="replace")
+    for encoding in ("utf-8", "gbk"):
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
+def python_process_rows() -> list:
+    """本机 python.exe 的 pid、父进程和完整命令行。"""
+    script = (
+        "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false; "
+        "$OutputEncoding = [Console]::OutputEncoding; "
+        "Get-CimInstance Win32_Process -Filter \"Name = 'python.exe'\" -ErrorAction SilentlyContinue "
+        "| Select-Object ProcessId, ParentProcessId, CommandLine | ConvertTo-Json -Compress"
+    )
+    raw = capture_text(
+        [powershell_exe(), "-NoProfile", "-NonInteractive", "-Command", script],
+        30,
+    ).strip().lstrip("\ufeff")
     if not raw:
         return []
     try:
@@ -751,26 +774,51 @@ def python_processes() -> list:
         except (TypeError, ValueError):
             continue
         command = row.get("CommandLine") or ""
+        try:
+            parent = int(row.get("ParentProcessId") or 0)
+        except (TypeError, ValueError):
+            parent = 0
         if pid > 0 and isinstance(command, str) and command:
-            found.append((pid, command))
+            found.append({"pid": pid, "parent": parent, "command": command})
     return found
+
+
+def python_processes() -> list:
+    """兼容旧调用：只要 pid 和命令行。"""
+    return [(row["pid"], row["command"]) for row in python_process_rows()]
 
 
 def pids_for_server(root: str) -> list:
     return [pid for pid, command in python_processes() if command_line_is_server(command, root)]
 
 
+def listener_kind(listener: int, root: str, extra_pids=()) -> str:
+    """端口上的进程是不是我们这份。
+
+    ours：命令行对得上，或者它是我们刚拉起的那个进程的子进程。
+    Windows 虚拟环境会先起 Scripts\\python.exe，再由它拉起真正在听端口的解释器。
+    foreign：命令行看得见，但不是这个目录的 server.py。
+    unknown：还没看清。这时不能当成别人的服务去关。
+    """
+    if not listener:
+        return "unknown"
+    extra = {int(pid) for pid in (extra_pids or []) if pid}
+    rows = python_process_rows()
+    match = next((row for row in rows if row["pid"] == listener), None)
+    if match is None:
+        return "ours" if listener in extra else "unknown"
+    if command_line_is_server(match["command"], root) or listener in extra or match["parent"] in extra:
+        return "ours"
+    if match["command"]:
+        return "foreign"
+    return "unknown"
+
+
 def listening_pid(port: int) -> int:
     """谁在听这个端口。对不上我们的 server.py 时，不会向它发关闭。"""
-    try:
-        result = subprocess.run(
-            ["netstat", "-ano", "-p", "tcp"],
-            capture_output=True, text=True, timeout=15,
-        )
-    except Exception:
-        return 0
+    text = capture_text(["netstat", "-ano", "-p", "tcp"], 15)
     suffix = ":%d" % port
-    for line in (result.stdout or "").splitlines():
+    for line in text.splitlines():
         if "LISTENING" not in line.upper():
             continue
         parts = line.split()
@@ -793,7 +841,7 @@ def request_shutdown(token: str) -> bool:
             method="POST",
             headers={"X-Kokoro-Token": token},
         )
-        urllib.request.urlopen(request, timeout=5).read()
+        open_local(request, 5).read()
         return True
     except Exception:
         return False
@@ -831,33 +879,31 @@ def kill_verified(pid: int, root: str) -> bool:
     return False
 
 
-def start_decision(existing, listener: int, health_running: bool) -> str:
-    """启动前怎么处理已有进程。
-
-    foreign：端口上是别人的服务，不能再起一份，也不能去停它。
-    reuse：已经是我们这份，并且端口就是它在听。
-    wait：我们这份还在加载，端口还没起来，不要再起第二份。
-    spawn：没有我们的进程，可以新起。
-    """
-    ours = set(existing or [])
-    if health_running and listener and listener not in ours:
-        return "foreign"
-    if health_running and listener in ours:
-        return "reuse"
-    if ours:
-        return "wait"
-    return "spawn"
+def start_choice(root: str, existing, health_running: bool):
+    """返回 (reuse|foreign|wait|spawn|unknown, listener)。"""
+    listener = listening_pid(PORT) if health_running else 0
+    if not health_running:
+        return ("wait" if existing else "spawn", listener)
+    kind = listener_kind(listener, root, existing)
+    if kind == "ours":
+        return ("reuse", listener)
+    if kind == "foreign":
+        return ("foreign", listener)
+    if existing:
+        return ("wait", listener)
+    return ("unknown", listener)
 
 
 def start_service(root: str, device: str, wait: bool = True, temp_dir: str = "", token: str = "") -> dict:
     existing = set(pids_for_server(root))
     health = service_state()
-    listener = listening_pid(PORT) if health["running"] else 0
-    decision = start_decision(existing, listener, health["running"])
+    decision, listener = start_choice(root, existing, health["running"])
     if decision == "foreign":
         for pid in list(existing):
             kill_verified(pid, root)
         fail("8765 端口上是另一份服务，没有启动新的。")
+    if decision == "unknown":
+        fail("8765 端口上已经有服务，但认不出是哪一份，没有再启动。")
     if decision == "reuse":
         return {"started": False, "running": True, "device": health["device"], "pid": listener}
     if decision == "wait":
@@ -866,8 +912,7 @@ def start_service(root: str, device: str, wait: bool = True, temp_dir: str = "",
         deadline = time.monotonic() + 180
         while time.monotonic() < deadline:
             health = service_state()
-            listener = listening_pid(PORT) if health["running"] else 0
-            decision = start_decision(existing, listener, health["running"])
+            decision, listener = start_choice(root, existing, health["running"])
             if decision == "reuse":
                 return {"started": False, "running": True, "device": health["device"], "pid": listener}
             if decision == "foreign":
@@ -937,8 +982,7 @@ def start_service(root: str, device: str, wait: bool = True, temp_dir: str = "",
                 tail = server_log_tail(tmp)
                 fail("本地 Kokoro 没有启动起来。" + (tail if tail else ""))
             health = service_state()
-            listener = listening_pid(PORT) if health["running"] else 0
-            decision = start_decision({process.pid}, listener, health["running"])
+            decision, _listener = start_choice(root, set(pids_for_server(root)) | {process.pid}, health["running"])
             if decision == "reuse":
                 keep = True
                 return {"started": True, "running": True, "device": health["device"], "pid": process.pid}
