@@ -81,6 +81,18 @@ async function getJson(path) {
   return body;
 }
 
+async function waitPlayback(playbackId) {
+  if (!playbackId) return { state: 'done', message: '' };
+  const deadline = Date.now() + 10 * 60 * 1000;
+  while (Date.now() < deadline) {
+    const body = await getJson('playback');
+    if (!body || body.id !== playbackId) return { state: 'done', message: '' };
+    if (body.state !== 'playing') return body;
+    await new Promise((resolve) => setTimeout(resolve, 800));
+  }
+  return { state: 'done', message: '' };
+}
+
 async function postJson(path, payload) {
   const init = { method: 'POST' };
   if (payload !== undefined) {
@@ -269,10 +281,13 @@ ui.speakBtn.addEventListener('click', async () => {
   setMessage('正在合成并朗读，第一次可能要等一会儿…', 'busy');
   try {
     const result = await postJson('speak', { text });
-    // 播放是后台做的，任务完成时音频还没放完，所以不能说「读完了」。
-    // 切了段就是后台流水播放，措辞再具体一点。
-    const playing = Number(result.segments) > 1;
-    setMessage(playing ? '已开始朗读，分段播放中。' : '已开始朗读。', 'ok');
+    setMessage('正在朗读…', 'busy');
+    const outcome = await waitPlayback(result.playbackId);
+    if (outcome.state === 'failed') {
+      setMessage(outcome.message || '朗读失败。', 'bad');
+    } else {
+      setMessage('朗读结束。', 'ok');
+    }
   } catch (error) {
     setMessage(error instanceof Error ? error.message : '朗读失败。', 'bad');
   } finally {

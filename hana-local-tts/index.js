@@ -531,41 +531,58 @@ function splitIntoSegments(rawText) {
 // 段间间隔 = 播放结束到下一段开始，只剩播放调用本身的启动开销，不再白等合成。
 // 流水线播放剩余段：当前段在放的同时，后台已在合下一段。
 // segments 不含已合好的第一段，所以 segments[0] 就是第二段。
+async function discardWav(file) {
+  if (!file) return;
+  await rm(file, { force: true }).catch(() => {});
+}
+
 async function playRemainingSegments(sdk, dir, segments, voice, speed, engine, total, firstFile) {
   const tempFile = () => path.join(dir, `speech-${randomBytes(8).toString("hex")}.wav`);
   const prepare = (text) => {
     const target = tempFile();
-    return writeSpeechFile(sdk, text, voice, speed, target, engine, false).then(() => target);
+    return writeSpeechFile(sdk, text, voice, speed, target, engine, false).then(() => target).catch(async (error) => {
+      await discardWav(target);
+      throw error;
+    });
   };
 
   // 第一段已在 firstFile 里。先把第二段的合成发出去，再播第一段。
   let currentFile = firstFile;
   let nextReady = segments.length > 0 ? prepare(segments[0]) : null;
   let playedIndex = 0;
+  let failed = null;
 
-  while (currentFile) {
-    try {
-      await playWavFile(sdk, currentFile);
-      playedIndex += 1;
-      await sdk.logger.info(`speech segment ${playedIndex}/${total} played`);
-    } catch (error) {
-      await sdk.logger.error(`speech segment ${playedIndex + 1}/${total} playback failed: ${failureText(error)}`);
-      if (currentFile !== firstFile) await rm(currentFile, { force: true }).catch(() => {});
-      return;
-    }
-    // 第一段是宿主的产物文件，不能删；后面的临时段用完就删
-    if (currentFile !== firstFile) await rm(currentFile, { force: true }).catch(() => {});
+  try {
+    while (currentFile) {
+      try {
+        await playWavFile(sdk, currentFile);
+        playedIndex += 1;
+        await sdk.logger.info(`speech segment ${playedIndex}/${total} played`);
+      } catch (error) {
+        await discardWav(currentFile);
+        currentFile = "";
+        failed = error;
+        break;
+      }
+      // 第一段留给宿主的任务结果。后面的临时段播完就删。
+      if (currentFile !== firstFile) await discardWav(currentFile);
 
-    if (!nextReady) break;
-    try {
-      currentFile = await nextReady;
-    } catch (error) {
-      await sdk.logger.error(`speech segment ${playedIndex + 1}/${total} failed: ${failureText(error)}`);
-      return;
+      if (!nextReady) break;
+      try {
+        currentFile = await nextReady;
+        nextReady = null;
+      } catch (error) {
+        failed = error;
+        break;
+      }
+      nextReady = segments.length > playedIndex ? prepare(segments[playedIndex]) : null;
     }
-    // 下一段已就绪：立刻发出再下一段的合成，然后回去播它
-    nextReady = segments.length > playedIndex ? prepare(segments[playedIndex]) : null;
+  } finally {
+    if (failed && nextReady) {
+      nextReady.then((file) => discardWav(file)).catch(() => {});
+    }
   }
+  if (failed) throw failed;
 }
 
 function speechMode(defaultVoice) {
@@ -621,6 +638,22 @@ function speechModelSnapshot() {
 
 // 正在朗读。第二次点不排队，直接拒绝，避免卡在宿主 30 秒超时里。
 let speechBusy = false;
+let playbackState = { id: 0, state: "idle", message: "" };
+
+function beginPlayback() {
+  playbackState = { id: playbackState.id + 1, state: "playing", message: "" };
+  return playbackState.id;
+}
+
+function finishPlayback(id) {
+  if (playbackState.id !== id) return;
+  playbackState = { id, state: "done", message: "" };
+}
+
+function failPlayback(id, message) {
+  if (playbackState.id !== id) return;
+  playbackState = { id, state: "failed", message: String(message || "朗读失败。").slice(0, 180) };
+}
 
 function claimSpeech() {
   if (speechBusy) throw new Error("正在朗读，等这一段结束再试。");
@@ -669,9 +702,14 @@ async function registerSpeechProvider(sdk) {
           await writeSpeechFile(sdk, segments[0], voice, speed, firstFile, engine, false);
           await sdk.logger.info(`speech provider wrote ${name} (1/${segments.length} segments, ${rest.length} queued)`);
           playbackStarted = true;
+          const playbackId = beginPlayback();
           // 播放放后台，但占用一直留到播完。这期间再点朗读会被拒绝。
-          playRemainingSegments(sdk, dir, rest, voice, speed, engine, segments.length, firstFile).catch(async (error) => {
-            await sdk.logger.error(`speech playback failed: ${failureText(error)}`);
+          playRemainingSegments(sdk, dir, rest, voice, speed, engine, segments.length, firstFile).then(() => {
+            finishPlayback(playbackId);
+          }).catch(async (error) => {
+            const message = failureText(error);
+            failPlayback(playbackId, message);
+            await sdk.logger.error(`speech playback failed: ${message}`);
           }).finally(releaseSpeech);
           return { taskId, files: [name] };
         } catch (error) {
@@ -1157,6 +1195,8 @@ export default defineApp(async (sdk) => {
 
     // 面板的「试听」：把用户输入的任意文字走同一条宿主语音链路读出来。
     // 声音和语速不在这里选：宿主会按「多媒体 → 语音合成」里真正生效的那份设置来解析。
+    app.get("/playback", (c) => c.json(playbackState));
+
     app.post("/speak", async (c) => {
       if (speechProviderError) return c.json({ ok: false, error: speechProviderError }, 500);
       let body;
@@ -1198,6 +1238,7 @@ export default defineApp(async (sdk) => {
           // 切了段时任务会在音频播完之前就完成，页面要据此换一句提示。
           // 依据是适配器内部的分段数：切了段就是后台流水播放，任务先返回、音频后放完。
           segments: splitIntoSegments(text).length,
+          playbackId: playbackState.id,
         }, completed ? 200 : 500);
       } catch (error) {
         return c.json({ ok: false, error: failureText(error) }, 500);
