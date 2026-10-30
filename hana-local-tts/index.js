@@ -883,6 +883,8 @@ async function startKokoroInstall(sdk, root, source, pipSource, torchSource, com
 
 let watcherRunning = false;
 let watcherChild = null;
+let watcherStoppedAt = 0;
+let watcherBackoffMs = 0;
 
 // 「自动停止」开关的标记文件：守护进程看到它没了就不再停服务。
 function autoStopFlagPath(sdk) {
@@ -1123,10 +1125,12 @@ async function ensureWatcherWhenReady(sdk) {
 
 async function ensureWatcher(sdk) {
   if (watcherRunning) return;
+  if (watcherBackoffMs && Date.now() - watcherStoppedAt < watcherBackoffMs) return;
   if (!(await autoStopEnabled(sdk))) return;
   const root = await kokoroRoot(sdk);
   // 还没选数据目录：没服务要守。
-  if (!root) return;  const hanaPid = await findHanaPid(sdk);
+  if (!root) return;
+  const hanaPid = await findHanaPid(sdk);
   if (!hanaPid) return;
   // 开关文件：用户关掉「自动停止」时删掉它，守护进程就不再停服务。
   const flag = autoStopFlagPath(sdk);
@@ -1134,7 +1138,7 @@ async function ensureWatcher(sdk) {
   await writeFile(flag, String(hanaPid), "utf8");
   const tokenFile = await ensureServiceTokenFile(sdk.dataDir);
   try {
-    watcherChild = await spawnDetached(sdk, sdk.dataDir, [
+    const child = await spawnDetached(sdk, sdk.dataDir, [
       "watch",
       "--root", root,
       "--pid", String(hanaPid),
@@ -1142,10 +1146,24 @@ async function ensureWatcher(sdk) {
       "--pid-file", watcherPidPath(sdk),
       "--token-file", tokenFile,
     ]);
+    const startedAt = Date.now();
+    const clearWatcher = () => {
+      if (watcherChild !== child) return;
+      watcherChild = null;
+      watcherRunning = false;
+      watcherStoppedAt = Date.now();
+      // 刚拉起来就退出，多半是句柄打不开。别每个状态刷新都再拉一次。
+      watcherBackoffMs = Date.now() - startedAt < 2000 ? 60000 : 0;
+    };
+    child.on("exit", clearWatcher);
+    child.on("error", clearWatcher);
+    watcherChild = child;
     watcherRunning = true;
+    watcherBackoffMs = 0;
     await writeSessionMarker(sdk, hanaPid);
     await sdk.logger.info("kokoro watcher started");
   } catch (error) {
+    watcherRunning = false;
     await sdk.logger.error(`kokoro watcher failed to start: ${failureText(error)}`);
   }
 }
@@ -1248,6 +1266,11 @@ export default defineApp(async (sdk) => {
     app.get("/kokoro-status", async (c) => {
       try {
         const status = await kokoroStatus(sdk);
+        if (status && status.running && !status.foreign) {
+          ensureWatcher(sdk).catch((error) => {
+            sdk.logger.warn(`kokoro watcher check failed: ${failureText(error)}`);
+          });
+        }
         return c.json(status);
       } catch (error) {
         return c.json({ error: failureText(error) }, 500);

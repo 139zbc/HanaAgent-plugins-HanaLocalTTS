@@ -8,6 +8,7 @@ App 进程受 Node 权限模型限制：只能读安装目录和自己的 app-da
 """
 
 import ctypes
+import hashlib
 import json
 import os
 import re
@@ -43,6 +44,10 @@ PYTHON_URLS = (
     "https://github.com/astral-sh/python-build-standalone/releases/download/%s/%s" % (PYTHON_BUILD, PYTHON_ARCHIVE),
 )
 PYTHON_BYTES = 47100000
+# 官方 20261026 发布页 SHA256SUMS 里这一份的校验值。对不上就不解压。
+PYTHON_SHA256 = "590dfcbe3a34c07301e6332e13e2188b98655cd072b08afa45a7998dc4c22bc5"
+PYTHON_DOWNLOAD_SECONDS = 1200
+PYTHON_LOCK_NAME = "python-download.lock"
 
 
 def emit(payload):
@@ -276,6 +281,60 @@ def write_python_state(state_dir, payload):
         pass
 
 
+def python_lock_path(state_dir):
+    return os.path.join(state_dir, "tmp", PYTHON_LOCK_NAME)
+
+
+def claim_python_download(state_dir):
+    """独占下载。已经有活着的进程在下，这次就退出，别一起写同一个压缩包。"""
+    path = python_lock_path(state_dir)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if os.path.isfile(path):
+        owner = 0
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                owner = int((handle.read() or "0").strip() or 0)
+        except (OSError, ValueError):
+            owner = 0
+        if owner and owner != os.getpid() and pid_alive(owner):
+            return False
+        try:
+            os.remove(path)
+        except OSError:
+            return False
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return False
+    try:
+        os.write(fd, str(os.getpid()).encode("ascii"))
+    finally:
+        os.close(fd)
+    return True
+
+
+def release_python_download(state_dir):
+    path = python_lock_path(state_dir)
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            owner = int((handle.read() or "0").strip() or 0)
+        if owner == os.getpid():
+            os.remove(path)
+    except (OSError, ValueError):
+        pass
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def python_version_of(executable):
     try:
         result = subprocess.run(
@@ -299,6 +358,15 @@ def install_python(target_dir, state_dir):
                 "message": "已经有 %s 了。" % version,
             })
             return {"installed": True, "version": version, "path": exe, "downloaded": False}
+    if not claim_python_download(state_dir):
+        return {"installed": False, "already": True, "message": "已经在下载。"}
+    try:
+        return download_portable_python(target_dir, state_dir, exe)
+    finally:
+        release_python_download(state_dir)
+
+
+def download_portable_python(target_dir, state_dir, exe):
     os.makedirs(target_dir, exist_ok=True)
     tmp_dir = os.path.join(state_dir, "tmp")
     os.makedirs(tmp_dir, exist_ok=True)
@@ -307,7 +375,10 @@ def install_python(target_dir, state_dir):
     ok = False
     for url in PYTHON_URLS:
         write_python_state(state_dir, {
-            "phase": "downloading", "percent": 0, "message": "正在下载 Python %s…" % PYTHON_VERSION,
+            "phase": "downloading",
+            "percent": 0,
+            "pid": os.getpid(),
+            "message": "正在下载 Python %s…" % PYTHON_VERSION,
         })
         try:
             request = urllib.request.Request(url, headers={"User-Agent": "hana-local-tts/1.0"})
@@ -315,9 +386,12 @@ def install_python(target_dir, state_dir):
                 total = int(response.headers.get("Content-Length") or 0)
                 done = 0
                 started = time.monotonic()
+                deadline = started + PYTHON_DOWNLOAD_SECONDS
                 last = 0.0
                 with open(archive, "wb") as handle:
                     while True:
+                        if time.monotonic() > deadline:
+                            raise TimeoutError("下载超过 %d 分钟" % (PYTHON_DOWNLOAD_SECONDS // 60))
                         chunk = response.read(262144)
                         if not chunk:
                             break
@@ -331,21 +405,31 @@ def install_python(target_dir, state_dir):
                             write_python_state(state_dir, {
                                 "phase": "downloading",
                                 "percent": percent,
+                                "pid": os.getpid(),
                                 "bytes": done,
                                 "total": total or PYTHON_BYTES,
                                 "speed": speed,
                                 "message": "已下 %.1f / %.1f MB · %.1f MB/秒" % (
                                     done / 1048576, max(total, done) / 1048576, speed / 1048576),
                             })
+            digest = file_sha256(archive)
+            if digest.lower() != PYTHON_SHA256:
+                raise RuntimeError("哈希不对")
             ok = True
             break
         except Exception as error:  # noqa: BLE001 - 换下一个源再试
             errors.append("%s：%s" % (url.split("/")[2], error))
+            try:
+                os.remove(archive)
+            except OSError:
+                pass
     if not ok:
         message = "Python 没下成。" + "；".join(errors)
-        write_python_state(state_dir, {"phase": "failed", "percent": 0, "message": message})
+        write_python_state(state_dir, {"phase": "failed", "percent": 0, "pid": 0, "message": message})
         fail(message)
-    write_python_state(state_dir, {"phase": "extracting", "percent": 95, "message": "正在解压…"})
+    write_python_state(state_dir, {
+        "phase": "extracting", "percent": 95, "pid": os.getpid(), "message": "正在解压…",
+    })
     try:
         import tarfile
         with tarfile.open(archive, "r:gz") as tar:
@@ -353,7 +437,7 @@ def install_python(target_dir, state_dir):
             tar.extractall(os.path.dirname(target_dir), filter="data")
     except Exception as error:  # noqa: BLE001
         message = "解压失败：%s" % error
-        write_python_state(state_dir, {"phase": "failed", "percent": 0, "message": message})
+        write_python_state(state_dir, {"phase": "failed", "percent": 0, "pid": 0, "message": message})
         fail(message)
     try:
         os.remove(archive)
@@ -362,10 +446,10 @@ def install_python(target_dir, state_dir):
     version = python_version_of(exe)
     if not version.startswith("3.12"):
         message = "解压出来的 Python 版本不对：%s" % (version or "读不到版本")
-        write_python_state(state_dir, {"phase": "failed", "percent": 0, "message": message})
+        write_python_state(state_dir, {"phase": "failed", "percent": 0, "pid": 0, "message": message})
         fail(message)
     write_python_state(state_dir, {
-        "phase": "done", "percent": 100, "version": version,
+        "phase": "done", "percent": 100, "pid": 0, "version": version,
         "message": "Python %s 已经装好。" % version,
     })
     return {"installed": True, "version": version, "path": exe, "downloaded": True}
@@ -757,17 +841,32 @@ def pid_alive(pid: int) -> bool:
     return True
 
 
-def wait_pid_exit(pid: int) -> None:
-    """等一个进程自己退出。不轮询，直接等内核通知。"""
+def wait_pid_exit(pid: int) -> bool:
+    """等一个进程自己退出。打不开句柄就返回 False，调用方不要据此停服务。"""
     if not pid:
-        return
-    handle = ctypes.windll.kernel32.OpenProcess(0x00100000, False, int(pid))
+        return False
+    try:
+        handle = ctypes.windll.kernel32.OpenProcess(0x00100000, False, int(pid))
+    except Exception:
+        return False
     if not handle:
-        return
+        return False
     try:
         ctypes.windll.kernel32.WaitForSingleObject(handle, 0xFFFFFFFF)
     finally:
         ctypes.windll.kernel32.CloseHandle(handle)
+    return True
+
+
+def watch_log(root: str, message: str) -> None:
+    """守护进程自己的日志。stdout 被丢掉了，写到数据目录里。"""
+    try:
+        folder = os.path.join(root, "tmp")
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, "watcher.log"), "a", encoding="utf-8") as handle:
+            handle.write(time.strftime("%Y-%m-%d %H:%M:%S ") + message + "\n")
+    except OSError:
+        pass
 
 
 def load_token(path: str) -> str:
@@ -1157,7 +1256,15 @@ def cmd_watch(argv):
                 handle.write(str(os.getpid()))
         except OSError:
             pass
-    wait_pid_exit(int(args.get("pid") or 0))
+    watched = int(args.get("pid") or 0)
+    if not wait_pid_exit(watched):
+        watch_log(root, "打不开 Hana 进程句柄（pid %s），守护退出，没有停服务。" % watched)
+        if pid_file:
+            try:
+                os.remove(pid_file)
+            except OSError:
+                pass
+        return
     if flag and not os.path.isfile(flag):
         # 用户把「自动停止」关了，就不动服务。
         return
@@ -1239,7 +1346,12 @@ def cmd_speak(argv):
         text = handle.read().strip()
     state = service_state()
     if not state["running"]:
-        state = start_service(root, device, wait=True, token=token)
+        start_service(root, device, wait=True, token=token)
+        state = service_state()
+    reported = state.get("root") or ""
+    if not state.get("running") or not reported or not same_path(reported, root):
+        who = reported or "认不出是哪一份"
+        fail("8765 端口上不是这次的数据目录（%s）。这次没有朗读，也没有停掉它。" % who)
     payload = json.dumps({"input": text, "voice": voice, "speed": float(speed)}).encode("utf-8")
     request = urllib.request.Request(
         "http://127.0.0.1:%d/v1/audio/speech" % PORT,

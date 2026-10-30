@@ -11,8 +11,9 @@
 // 的检查都必须包 try/catch，否则整个流程会被一个 existsSync 弄死。
 
 import { execFile, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { readFile, mkdir, rm, stat, writeFile } from "node:fs/promises";
+import { open, readFile, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -36,7 +37,12 @@ const PORTABLE_PYTHON_URLS = [
 ];
 // 压缩包约 45MB，用来算进度条。
 const PORTABLE_PYTHON_BYTES = 47100000;
+// 和 helper.py 里的 PYTHON_SHA256 是同一个值，来自官方 SHA256SUMS。
+const PORTABLE_PYTHON_SHA256 = "590dfcbe3a34c07301e6332e13e2188b98655cd072b08afa45a7998dc4c22bc5";
+const PORTABLE_PYTHON_DOWNLOAD_SECONDS = 1200;
 const PORTABLE_PYTHON_STATE = "python-state.json";
+const PORTABLE_PYTHON_LOCK = "python-download.lock";
+let pythonDownloadClaimed = false;
 
 // 宿主会清空子进程的环境变量，这里按需补齐，别让子进程依赖继承来的值。
 export function childEnv(dataDir) {
@@ -264,11 +270,48 @@ async function writePythonState(dataDir, patch) {
 
 // app-data 里那份 Python 的状态。这一步不用助手：机器上可能一个 Python 都没有，
 // 助手（Python 脚本）跑不起来，状态还是得能显示。
+function pidAlive(pid) {
+  const id = Number(pid) || 0;
+  if (id <= 0) return false;
+  try {
+    process.kill(id, 0);
+    return true;
+  } catch (error) {
+    return !!(error && error.code === "EPERM");
+  }
+}
+
+function pythonDownloadActive(state) {
+  const phase = state && state.phase;
+  if (phase !== "downloading" && phase !== "extracting") return false;
+  const pid = Number(state.pid) || 0;
+  if (pid && pidAlive(pid)) return true;
+  // 刚点下去、子进程号还没写上的那几秒，别当成已经死了。
+  const updated = Number(state.updatedAt) || 0;
+  return !pid && updated > 0 && Date.now() - updated < 15000;
+}
+
+async function settleStalePythonDownload(dataDir, state) {
+  const active = state && (state.phase === "downloading" || state.phase === "extracting");
+  if (!active) return state;
+  // 这次点击还在解压，子进程已经退出，不能当成下载中断。
+  if (pythonDownloadClaimed) return state;
+  if (pythonDownloadActive(state)) return state;
+  return writePythonState(dataDir, {
+    phase: "failed",
+    pid: 0,
+    percent: 0,
+    message: "下载中断了，可以再点一次。",
+  });
+}
+
 export async function portablePythonState(sdk, dataDir) {
   const exe = path.join(dataDir, DOWNLOADED_DIR, "python.exe");
-  const state = await readPythonState(dataDir);
+  let state = await readPythonState(dataDir);
+  state = await settleStalePythonDownload(dataDir, state);
+  const downloading = pythonDownloadActive(state);
   if (!safeExists(exe)) {
-    return { ready: false, version: "", path: "", downloading: state.phase === "downloading", state };
+    return { ready: false, version: "", path: "", downloading, state };
   }
   const version = await pythonVersion(exe, [], dataDir);
   const ok = !!version && version.major === 3 && version.minor === 12;
@@ -276,7 +319,7 @@ export async function portablePythonState(sdk, dataDir) {
     ready: ok,
     version: version ? version.text : "",
     path: ok ? exe : "",
-    downloading: state.phase === "downloading",
+    downloading,
     state,
   };
 }
@@ -300,53 +343,116 @@ export async function pythonDownloadProgress(dataDir) {
 // 下载并装好 App 自带的 Python。
 // 这一步不能交给助手：助手本身就是 Python 脚本，机器上一个 Python 都没有时它跑不起来。
 // 所以用系统自带的工具：curl.exe 下载（PowerShell 兵底），tar.exe 解压。
+async function claimPythonDownloadFile(dataDir, pid) {
+  const lockPath = path.join(dataDir, "tmp", PORTABLE_PYTHON_LOCK);
+  await mkdir(path.dirname(lockPath), { recursive: true });
+  let owner = 0;
+  try {
+    owner = Number(await readFile(lockPath, "utf8")) || 0;
+  } catch {
+    owner = 0;
+  }
+  if (owner && owner !== pid && pidAlive(owner)) return false;
+  await rm(lockPath, { force: true }).catch(() => {});
+  try {
+    const handle = await open(lockPath, "wx");
+    await handle.writeFile(String(pid));
+    await handle.close();
+    return true;
+  } catch (error) {
+    if (error && error.code === "EEXIST") return false;
+    throw error;
+  }
+}
+
+async function releasePythonDownloadFile(dataDir, pid) {
+  const lockPath = path.join(dataDir, "tmp", PORTABLE_PYTHON_LOCK);
+  try {
+    const owner = Number(await readFile(lockPath, "utf8")) || 0;
+    if (owner === pid) await rm(lockPath, { force: true });
+  } catch {
+    // 锁已经没了就不用管。
+  }
+}
+
 export async function startPythonDownload(sdk, dataDir) {
+  if (pythonDownloadClaimed) return { started: true, resumed: true };
   const existing = await portablePythonState(sdk, dataDir);
   if (existing.ready) return { started: false, reason: "已经有了", version: existing.version };
-  const state = await readPythonState(dataDir);
-  if (state.phase === "downloading" || state.phase === "extracting") return { started: true, resumed: true };
+  if (existing.downloading) return { started: true, resumed: true };
+  pythonDownloadClaimed = true;
   const tmp = path.join(dataDir, "tmp");
   await mkdir(tmp, { recursive: true });
   const archive = path.join(tmp, "python.tar.gz");
-  await rm(archive, { force: true }).catch(() => {});
-  await writePythonState(dataDir, {
-    phase: "downloading",
-    percent: 0,
-    bytes: 0,
-    total: PORTABLE_PYTHON_BYTES,
-    message: `正在下载 Python ${PORTABLE_PYTHON_VERSION}…`,
-    error: "",
-  });
-  // 有 Python 就让助手下（它的 urllib 稳），后台跑，不占着这次请求。
-  const python = await resolveInterpreter(sdk, dataDir, false, "auto");
-  if (python.kind !== "none") {
-    await spawnDetached(sdk, dataDir, [
-      "python-install",
-      "--dir", path.join(dataDir, DOWNLOADED_DIR),
-      "--state-dir", dataDir,
-    ]);
-    return { started: true, via: "helper" };
+  let lockHeld = false;
+  try {
+    lockHeld = await claimPythonDownloadFile(dataDir, process.pid);
+    if (!lockHeld) {
+      pythonDownloadClaimed = false;
+      return { started: true, resumed: true };
+    }
+    await rm(archive, { force: true }).catch(() => {});
+    await writePythonState(dataDir, {
+      phase: "downloading",
+      percent: 0,
+      pid: 0,
+      bytes: 0,
+      total: PORTABLE_PYTHON_BYTES,
+      message: `正在下载 Python ${PORTABLE_PYTHON_VERSION}…`,
+      error: "",
+    });
+    // 有 Python 就让助手下（它的 urllib 稳），后台跑，不占着这次请求。
+    // 锁交给助手自己占，这里先放开，不然助手会以为已经有人在下。
+    const python = await resolveInterpreter(sdk, dataDir, false, "auto");
+    if (python.kind !== "none") {
+      await releasePythonDownloadFile(dataDir, process.pid);
+      lockHeld = false;
+      const child = await spawnDetached(sdk, dataDir, [
+        "python-install",
+        "--dir", path.join(dataDir, DOWNLOADED_DIR),
+        "--state-dir", dataDir,
+      ]);
+      await writePythonState(dataDir, { phase: "downloading", pid: child.pid });
+      pythonDownloadClaimed = false;
+      return { started: true, via: "helper", pid: child.pid };
+    }
+    // 一个 Python 都没有：助手跑不起来，只能用系统自带的 curl.exe。
+    runPythonDownload(sdk, dataDir, archive).finally(async () => {
+      await releasePythonDownloadFile(dataDir, process.pid);
+      pythonDownloadClaimed = false;
+    });
+    return { started: true, via: "curl" };
+  } catch (error) {
+    if (lockHeld) await releasePythonDownloadFile(dataDir, process.pid);
+    pythonDownloadClaimed = false;
+    await writePythonState(dataDir, { phase: "failed", pid: 0, message: "下载没开始。" });
+    throw error;
   }
-  // 一个 Python 都没有：助手跑不起来，只能用系统自带的 curl.exe。
-  runPythonDownload(sdk, dataDir, archive);
-  return { started: true, via: "curl" };
 }
 
 async function runPythonDownload(sdk, dataDir, archive) {
   const curl = await resolveCommand(sdk, ["curl.exe", "curl"]);
   const shell = await resolveCommand(sdk, ["powershell.exe", "powershell"]);
+  let lastError = "";
   for (const url of PORTABLE_PYTHON_URLS) {
     await writePythonState(dataDir, { phase: "downloading", percent: 0, message: "正在下载 Python…" });
     let ok = false;
     if (curl) ok = await downloadWithCurl(sdk, dataDir, curl, url, archive);
     if (!ok && shell) ok = await downloadWithPowerShell(sdk, dataDir, shell, url, archive);
     if (ok) {
-      await finishPythonInstall(sdk, dataDir, archive);
-      return;
+      const installed = await finishPythonInstall(sdk, dataDir, archive);
+      if (installed) return;
+      lastError = "压缩包校验没通过，没有解压。";
+      await rm(archive, { force: true }).catch(() => {});
     }
-    await writePythonState(dataDir, { phase: "retrying", percent: 0, message: "这个源没成，换一个…" });
+    await writePythonState(dataDir, { phase: "retrying", percent: 0, pid: 0, message: "这个源没成，换一个…" });
   }
-  await writePythonState(dataDir, { phase: "failed", percent: 0, message: "Python 没下成，两个源都不通。" });
+  await writePythonState(dataDir, {
+    phase: "failed",
+    percent: 0,
+    pid: 0,
+    message: lastError || "Python 没下成，两个源都不通。",
+  });
 }
 
 // curl.exe 下载。失败返回 false，换下一个办法。
@@ -356,39 +462,83 @@ function downloadWithCurl(sdk, dataDir, curl, url, archive) {
     try {
       child = spawn(
         curl,
-        ["-L", "--fail", "--retry", "2", "--connect-timeout", "20", "-o", archive, url],
-        { cwd: dataDir, env: childEnv(dataDir), windowsHide: true, stdio: ["ignore", "ignore", "pipe"] },
+        [
+          "-L", "--fail", "--retry", "2", "--connect-timeout", "20",
+          "--max-time", String(PORTABLE_PYTHON_DOWNLOAD_SECONDS),
+          "--silent", "--show-error",
+          "-o", archive, url,
+        ],
+        { cwd: dataDir, env: childEnv(dataDir), windowsHide: true, stdio: "ignore" },
       );
-    } catch (error) {
+    } catch {
       resolve(false);
       return;
     }
+    writePythonState(dataDir, { phase: "downloading", pid: child.pid }).catch(() => {});
     child.on("error", () => resolve(false));
     child.on("exit", (code) => resolve(code === 0));
   });
 }
 
 // PowerShell 的 Invoke-WebRequest 兵底。有些环境里 curl 的 TLS 凭据拿不到。
-async function downloadWithPowerShell(sdk, dataDir, shell, url, archive) {
+function downloadWithPowerShell(sdk, dataDir, shell, url, archive) {
   const script = [
     "$ErrorActionPreference = 'Stop'",
     "$ProgressPreference = 'SilentlyContinue'",
-    `Invoke-WebRequest -Uri '${url.replace(/'/g, "''")}' -OutFile '${archive.replace(/'/g, "''")}' -UseBasicParsing -TimeoutSec 1800`,
+    `Invoke-WebRequest -Uri '${url.replace(/'/g, "''")}' -OutFile '${archive.replace(/'/g, "''")}' -UseBasicParsing -TimeoutSec ${PORTABLE_PYTHON_DOWNLOAD_SECONDS}`,
   ].join("\n");
-  try {
-    await runCommand(shell, ["-NoProfile", "-NonInteractive", "-Command", script], dataDir, 1800000);
-    return true;
-  } catch {
-    return false;
-  }
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(shell, ["-NoProfile", "-NonInteractive", "-Command", script], {
+        cwd: dataDir,
+        env: childEnv(dataDir),
+        windowsHide: true,
+        stdio: "ignore",
+      });
+    } catch {
+      resolve(false);
+      return;
+    }
+    writePythonState(dataDir, { phase: "downloading", pid: child.pid }).catch(() => {});
+    const timer = setTimeout(() => {
+      try { child.kill(); } catch { /* 已经退出了 */ }
+    }, PORTABLE_PYTHON_DOWNLOAD_SECONDS * 1000);
+    child.on("error", () => {
+      clearTimeout(timer);
+      resolve(false);
+    });
+    child.on("exit", (code) => {
+      clearTimeout(timer);
+      resolve(code === 0);
+    });
+  });
+}
+
+async function fileSha256(file) {
+  const hash = createHash("sha256");
+  hash.update(await readFile(file));
+  return hash.digest("hex");
 }
 
 async function finishPythonInstall(sdk, dataDir, archive) {
+  let digest = "";
+  try {
+    digest = await fileSha256(archive);
+  } catch (error) {
+    await writePythonState(dataDir, { phase: "failed", pid: 0, percent: 0, message: `校验失败：${String((error && error.message) || error)}` });
+    return false;
+  }
+  if (digest !== PORTABLE_PYTHON_SHA256) {
+    await rm(archive, { force: true }).catch(() => {});
+    await writePythonState(dataDir, { phase: "retrying", pid: 0, percent: 0, message: "压缩包校验没通过，换一个源。" });
+    return false;
+  }
   await writePythonState(dataDir, { phase: "extracting", percent: 95, message: "正在解压…" });
   const tar = await resolveCommand(sdk, ["tar.exe", "tar"]);
   if (!tar) {
-    await writePythonState(dataDir, { phase: "failed", percent: 0, message: "找不到 Windows 自带的 tar.exe，解不开压缩包。" });
-    return;
+    await writePythonState(dataDir, { phase: "failed", pid: 0, percent: 0, message: "找不到 Windows 自带的 tar.exe，解不开压缩包。" });
+    return false;
   }
   try {
     // 压缩包顶层就是 python/，解压到 app-data 里正好落在 app-data/python。
@@ -407,9 +557,11 @@ async function finishPythonInstall(sdk, dataDir, archive) {
   await writePythonState(dataDir, {
     phase: "done",
     percent: 100,
+    pid: 0,
     version: version.text,
     message: `Python ${version.text} 已经装好。`,
   });
+  return true;
 }
 
 // 把 server.py / install.py / helper.py 放进 App 数据目录，助手会搬到安装目录再跑。
@@ -474,8 +626,13 @@ export async function spawnDetached(sdk, dataDir, args) {
     stdio: "ignore",
     windowsHide: true,
   });
+  // 不听 error 的话，启动失败会把整个 App 进程打崩。
+  child.on("error", (error) => {
+    const message = error && error.message ? error.message : String(error);
+    Promise.resolve(sdk.logger.error(`后台进程启动失败：${message}`)).catch(() => {});
+  });
   child.unref();
-  return child.pid;
+  return child;
 }
 
 function parseHelperOutput(stdout, stderr) {
