@@ -57,6 +57,7 @@
 - **Python 运行环境**：机器上没有 Python 时，插件会下一个便携版 3.12 到自己的数据目录。来源可选「自动 / App 自带 / 系统里的」。
 - **模型**：三个下载源可选，ModelScope（默认，国内推荐）、HF 镜像（`hf-mirror.com`）、HuggingFace 直连。
 - **运行环境**：CPU（PyTorch 2.14.1）和 GPU（PyTorch 2.14.1+cu130）两套分开装，pip 源可选清华 / 阿里 / PyPI 官方，GPU 轮子可选南大镜像 / PyTorch 官方。
+- **下载可取消**：模型、CPU / GPU 运行环境、便携版 Python 四项下载一旦开始，按钮就变成「取消」，点一下中止这次下载（会连带杀掉 pip 等子进程、清掉锁和下了一半的文件），不用干等。取消后重试时坏掉的 Python 环境会自动重建。
 - **状态显示**：写清楚「已下载（名字 大小）」，比如 `已下载（Kokoro-82M-v1.1-zh 314M）`、`已下载（PyTorch 2.14.1+cu130 CUDA 3.6G）`，不装却说装了的假象没有。
 
 ### 2.6 服务生命周期
@@ -309,6 +310,17 @@ limitations under the License.
 
 - 模型权重 [`hexgrad/Kokoro-82M-v1.1-zh`](https://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh)（Apache-2.0），ModelScope 镜像 `AI-ModelScope/Kokoro-82M-v1.1-zh`。
 - 推理框架 `kokoro`、`misaki`、`PyTorch`、`transformers` 等，各自遵循其上游许可证，安装时由 pip 带入。
+
+---
+
+## 七、更新记录
+
+| 版本 | 改动 |
+| --- | --- |
+| 0.9.16（当前） | 下载可以取消：下载开始后按钮变成「取消」，点一下中止整棵安装进程树，清掉锁和半截文件；重试时坏的 Python 环境自动重建。修掉取消后设置页状态刷新崩掉的 bug（下载项名字被当成行 id，`getElementById` 拿到 null）。 |
+| 0.9.15 | 0.9.14 之后的中间构建，只出过包，没有作为发布版本对外发过。 |
+| 0.9.14 | 修掉改数据目录时抛 `ReferenceError` 的问题：代码拆成 lib/ 六模块时漏了 `readyVoices.clear()` 的引用，新电脑上选完目录一直提示「没保存」。自查脚本补上成员访问这一类漏引检查。 |
+| 0.9.13 | 数据目录改用宿主的原生文件夹选择器，插件不再写死本机路径；别人装上也能自己挑个目录装模型。 |
 
 ---
 
