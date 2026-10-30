@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { defineApp } from "./sdk/app-contract/server-client.js";
 import { KOKORO_VOICES } from "./kokoro-voices.js";
 import { runHelper, spawnDetached, startInstall, writeAppSources, portablePythonState, pythonDownloadProgress, startPythonDownload, effectivePython } from "./kokoro-runtime.js";
@@ -13,7 +14,13 @@ const SPEECH_TEXT_MAX_BYTES = 32 * 1024; // 宿主的语音文本预算
 const SPEAK_TEXT_MAX_CHARS = 500; // 面板试听输入的上限
 const SPEAK_TIMEOUT_MS = 25000;
 const KOKORO_TIMEOUT_MS = 90000;
-const KOKORO_ROOT_DEFAULT = "D:\\ProgramData\\OH-WorkSpace\\hanako\\kokoro-zh";
+// 数据目录里那个子目录的名字。用插件 id（清单里的 id），不用显示名。
+//
+// 为什么不用显示名「本地语音朗读」：espeak-ng 的 dll 打开数据文件时用的是窄字符
+// 接口，路径里只要有非 ASCII 字符就找不到文件，服务直接起不来（实测：同一个
+// 环境目录，叫 kokoro2 能起，叫 本地语音朗读 就报 “Error processing file
+// .../phontab”）。插件 id 是 ASCII，用户名目录也可能带中文，所以整条路径都必须是 ASCII。
+const DATA_DIR_NAME = "hana-local-tts";
 const KOKORO_DEFAULT_VOICE = "zf_094";
 const KOKORO_VOICE_IDS = new Set(KOKORO_VOICES.map((item) => item.id));
 const PROVIDER_ID = "hana-local-tts";
@@ -204,19 +211,40 @@ async function listVoices(sdk) {
   return parseVoices(stdout);
 }
 
+// 没选数据目录时，给用户一个建议的起点：文档文件夹。
 function defaultKokoroRoot() {
-  return path.join(os.homedir(), ".hanako", "app-data", "hana-local-tts", "kokoro");
+  return path.join(os.homedir(), "Documents");
+}
+
+// 数据目录名：跟清单里的插件 id 一致。用插件 id 而不是显示名：显示名是中文，
+// 而 espeak-ng 的 dll 处理不了非 ASCII 路径（见 DATA_DIR_NAME 那条注释）。
+let dataDirName = DATA_DIR_NAME;
+try {
+  const manifest = JSON.parse(await readFile(path.join(path.dirname(fileURLToPath(import.meta.url)), "manifest.json"), "utf8"));
+  if (typeof manifest.id === "string" && /^[A-Za-z0-9._-]+$/.test(manifest.id)) dataDirName = manifest.id;
+} catch {
+  // 读不到清单就用写死的那个。
+}
+
+// 用户挑了文件夹之后，App 在里面建一个自己的子目录，模型和运行环境都放那儿。
+function dataDirUnder(picked) {
+  return path.join(picked, dataDirName);
 }
 
 async function kokoroStatus(sdk) {
   const root = await kokoroRoot(sdk);
-  const result = { installed: false, modelReady: false, cpuReady: false, gpuReady: false, dirGB: null, running: false, foreign: false, device: "", serviceRoot: "", path: root, defaultPath: defaultKokoroRoot(), autoStop: await autoStopEnabled(sdk), targetDevice: await kokoroDevice(sdk), probeFailed: false, probeError: "", modelName: "", modelBytes: 0, cpuName: "", cpuBytes: 0, gpuName: "", gpuBytes: 0 };
+  const result = { installed: false, modelReady: false, cpuReady: false, gpuReady: false, dirGB: null, running: false, foreign: false, device: "", serviceRoot: "", path: root, defaultPath: defaultKokoroRoot(), autoStop: await autoStopEnabled(sdk), targetDevice: await kokoroDevice(sdk), probeFailed: false, probeError: "", modelName: "", modelBytes: 0, cpuName: "", cpuBytes: 0, gpuName: "", gpuBytes: 0, needPath: !root };
   // Python 那一行不用助手：机器上可能一个 Python 都没有，助手跑不起来。
   const portable = await portablePythonState(sdk, sdk.dataDir);
   result.pythonReady = portable.ready === true;
   result.pythonVersion = portable.version || "";
   result.pythonSource = await pythonSource(sdk);
   result.pythonDownloading = portable.downloading === true;
+  // 还没选数据目录：没什么可探测的，先让用户去选。
+  if (!root) {
+    await sdk.logger.info("kokoro status: no data directory chosen yet");
+    return result;
+  }
   try {
     const parsed = await runKokoroHelper(sdk, ["probe", "--root", root], { timeoutMs: 30000 });
     result.modelReady = parsed.model === true;
@@ -323,12 +351,19 @@ function cleanInstallPath(value) {
   return /^[A-Za-z]:[\\\/].+/.test(normalized) ? normalized : "";
 }
 
+// 整条路径都必须是 ASCII：espeak-ng 的 dll 打开数据文件时用窄字符接口，
+// 路径里有中文就找不到文件（“Error processing file .../phontab”），服务直接起不来。
+function hasNonAscii(text) {
+  return /[^\x00-\x7F]/.test(String(text || ""));
+}
+
+// 数据目录：用户在设置页里挑的。没挑过就是空串——不猜，也不写死某个本机路径。
 async function kokoroRoot(sdk) {
   try {
     const all = await sdk.config.getAll();
-    return cleanInstallPath(all && all.kokoroRoot) || KOKORO_ROOT_DEFAULT;
+    return cleanInstallPath(all && all.kokoroRoot);
   } catch {
-    return KOKORO_ROOT_DEFAULT;
+    return "";
   }
 }
 
@@ -895,6 +930,7 @@ async function cleanupOrphanKokoro(sdk) {
 
 async function startKokoroService(sdk) {
   const root = await kokoroRoot(sdk);
+  if (!root) throw new Error("还没选数据目录。先在设置页里点「浏览」选一个。");
   const device = await kokoroDevice(sdk);
   await syncServerCode(sdk, root);
   const result = await runKokoroHelper(sdk, ["start", "--root", root, "--device", device], { timeoutMs: 200000 });
@@ -915,6 +951,7 @@ async function syncServerCode(sdk, root) {
 
 async function spawnKokoroService(sdk) {
   const root = await kokoroRoot(sdk);
+  if (!root) throw new Error("还没选数据目录。先在设置页里点「浏览」选一个。");
   const device = await kokoroDevice(sdk);
   await syncServerCode(sdk, root);
   const result = await runKokoroHelper(sdk, ["start", "--root", root, "--device", device, "--wait", "0"], { timeoutMs: 30000 });
@@ -935,6 +972,8 @@ async function readKokoroLive(sdk) {
 async function stopKokoroService(sdk, rootOverride) {
   // rootOverride：服务在别的目录跑的时候（比如换过安装路径），按它自己的目录找进程。
   const root = rootOverride || (await kokoroRoot(sdk));
+  // 还没选过目录就没什么可停的。
+  if (!root) return { ok: true, stopped: [] };
   const result = await runKokoroHelper(sdk, ["stop", "--root", root], { timeoutMs: 30000 });
   const stopped = result && Array.isArray(result.stopped) ? result.stopped : [];
   await sdk.logger.info(`kokoro stopped: ${stopped.join(",") || "none"}`);
@@ -961,6 +1000,8 @@ async function ensureWatcher(sdk) {
   if (watcherRunning) return;
   if (!(await autoStopEnabled(sdk))) return;
   const root = await kokoroRoot(sdk);
+  // 还没选数据目录：没服务要守。
+  if (!root) return;
   const hanaPid = await findHanaPid(sdk);
   if (!hanaPid) return;
   // 开关文件：用户关掉「自动停止」时删掉它，守护进程就不再停服务。
@@ -1166,8 +1207,9 @@ export default defineApp(async (sdk) => {
         } else {
           source = KOKORO_TORCH_SOURCES[requested] || torchSource;
         }
-        const root = cleanInstallPath(body && body.root) || (await kokoroRoot(sdk));
-        await sdk.config.setMany({ kokoroRoot: root });
+        // 数据目录只能在设置页里用「浏览」选。这里不再听客户端的路径。
+        const root = await kokoroRoot(sdk);
+        if (!root) return c.json({ ok: false, error: "还没选数据目录。先在「数据目录」里点「浏览」选一个。" }, 400);
         // 记住模型是从哪个源下的，换声音时补下声音文件优先用同一个源。
         // 写不进去也不能拦下下载：记不住就用默认的源。
         if (component === "model") {
@@ -1194,6 +1236,7 @@ export default defineApp(async (sdk) => {
       }
     });
 
+    // 改数据目录：用户在宿主里挑了一个文件夹，App 在里面建一个自己的子目录。
     app.put("/kokoro-path", async (c) => {
       let body;
       try {
@@ -1201,18 +1244,39 @@ export default defineApp(async (sdk) => {
       } catch {
         return c.json({ error: "请求不是 JSON。" }, 400);
       }
-      const root = cleanInstallPath(body && body.root);
-      if (!root) return c.json({ error: "路径要写完整盘符，例如 D:\\models\\kokoro。" }, 400);
-      if (root.length > 160) return c.json({ error: "路径太长。" }, 400);
+      const picked = cleanInstallPath(body && body.root);
+      if (!picked) return c.json({ error: "要选一个完整的文件夹。" }, 400);
+      if (picked.length > 160) return c.json({ error: "路径太长。" }, 400);
+      // 路径里不能有中文：espeak-ng 的 dll 处理不了非 ASCII 路径，服务会起不来。
+      if (hasNonAscii(picked)) {
+        return c.json({ error: "这个路径里有中文或特殊字符，装不了。请选一个纯英文数字的文件夹，比如 D:\\Models。" }, 400);
+      }
+      const root = dataDirUnder(picked);
+      const previous = await kokoroRoot(sdk);
+      // 先验目录：建得出来、写得了，才往下走。别等下了 5GB 才发现这个盘写不了。
+      // 校验要靠助手（Node 权限模型读不到用户目录），所以机器上还没 Python 时
+      // 只能先记下路径，等 Python 装好了再验。
+      let check = null;
+      try {
+        check = await runKokoroHelper(sdk, ["check-dir", "--root", root], { timeoutMs: 60000 });
+      } catch (error) {
+        const raw = String((error && error.message) || "");
+        if (!/找不到能用的 Python/.test(raw)) {
+          return c.json({ error: failureText(error, "这个目录用不了") }, 400);
+        }
+        await sdk.logger.info("kokoro path saved without check: no python yet");
+      }
       // 换目录前先把在跑的服务停掉：它占着 8765，而且加载的是旧目录里的模型。
       let stopped = [];
       try {
         const status = await kokoroStatus(sdk);
         if (status.running) {
-          const target = status.serviceRoot || (await kokoroRoot(sdk));
-          const result = await stopKokoroService(sdk, target);
-          stopped = result.stopped || [];
-          await sdk.logger.info(`kokoro stopped before path change: ${stopped.join(",") || "none"}`);
+          const target = status.serviceRoot || previous;
+          if (target) {
+            const result = await stopKokoroService(sdk, target);
+            stopped = result.stopped || [];
+            await sdk.logger.info(`kokoro stopped before path change: ${stopped.join(",") || "none"}`);
+          }
         }
       } catch (error) {
         await sdk.logger.error(`kokoro stop before path change failed: ${failureText(error)}`);
@@ -1225,7 +1289,7 @@ export default defineApp(async (sdk) => {
       // 声音文件是按目录放的，换了目录要重新确认一遍。
       readyVoices.clear();
       await sdk.logger.info(`kokoro root set to ${root}`);
-      return c.json({ ok: true, root, stopped });
+      return c.json({ ok: true, root, picked, previous, checked: !!check, freeBytes: (check && check.freeBytes) || 0, stopped });
     });
 
     app.post("/kokoro-start", async (c) => {

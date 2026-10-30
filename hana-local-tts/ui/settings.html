@@ -150,15 +150,16 @@
         <div class="row">
           <div class="text">
             <span class="row-title">数据目录</span>
-            <span class="row-desc">模型及运行环境存储位置。改路径后点保存后生效。</span>
+            <span class="row-desc">模型及运行环境存储位置。点「浏览」选一个文件夹，App 会在里面建一个「hana-local-tts」子目录。路径要纯英文数字，不能有中文。</span>
           </div>
         </div>
         <div class="row">
           <div class="path-row">
-            <input id="install-root" type="text" spellcheck="false">
-            <button id="save-path" type="button" class="primary">保存</button>
+            <input id="install-root" type="text" spellcheck="false" readonly>
+            <button id="browse-path" type="button" class="primary">浏览</button>
           </div>
         </div>
+        <p class="hint" id="hint-path" hidden></p>
         <p class="row-error" id="error-path" role="alert" hidden></p>
       </div>
     </section>
@@ -180,6 +181,6 @@
       </div>
     </section>
   </main>
-  <script type="module" src="./assets/settings.js?v=14"></script>
+  <script type="module" src="./assets/settings.js?v=15"></script>
 </body>
 </html>

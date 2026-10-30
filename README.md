@@ -21,7 +21,9 @@
 
 卡片面板多了一块「试听」：可以自己写想听的文字，点「朗读这段文字」就按当前的声音和语速读出来。输入框预填了三行测试语（开场、多音字、数字与英文混读），可以直接改。
 
-本地模型装在 `D:\ProgramData\OH-WorkSpace\hanako\kokoro-zh`，不在这个 Git 仓库里。服务脚本的存档副本是 [kokoro/server.py](kokoro/server.py)。正在跑的那份在模型目录里，改脚本时两份要一起改。
+本地模型装在用户在设置页里选的数据目录里（现在是 `D:\tmp\hana-local-tts\hana-local-tts`），不在这个 Git 仓库里。服务脚本的存档副本是 [kokoro/server.py](kokoro/server.py)。正在跑的那份在模型目录里，改脚本时两份要一起改。
+
+数据目录的整条路径必须是纯 ASCII：espeak-ng 的 dll 打开数据文件时用窄字符接口，路径里有中文就找不到文件（报 `Error processing file .../phontab`），服务直接起不来。所以 App 在用户选的文件夹里建的是 `hana-local-tts` 这个 ASCII 子目录，选文件夹时也会挡掉含中文的路径。
 
 完整计划见 [PLAN.md](PLAN.md)。
 

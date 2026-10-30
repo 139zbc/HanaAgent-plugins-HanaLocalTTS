@@ -353,6 +353,38 @@ CPU 运行环境  已下载（PyTorch 2.14.1 CPU 1.2G）
 GPU 运行环境  已下载（PyTorch 2.14.1+cu130 CUDA 3.6G）
 ```
 
+### M18-1：数据目录改用宿主的原生文件夹选择器
+
+**起因**：App 要分享出去，`index.js` 里写死的 `D:\ProgramData\OH-WorkSpace\hanako\kokoro-zh` 是本机路径；别人装上会往一个不存在又没权限的目录里写东西。
+
+**做法**：
+- 删掉写死的路径。`kokoroRoot()` 没配置时返回空串，`kokoroStatus` 返回 `needPath: true` 并跳过探测。
+- 设置页「保存」换成「浏览」，用宿主 SDK 的 `hana.resources.pick({ mode: "directory" }, { timeoutMs: 600000 })`——就是 Hana 设置页里那个原生文件夹选择器（同一个 Electron `dialog.showOpenDialog`）。清单里要加账本词 `app/resources.read`（`resource.pick` / `resource.open` / `resource.requestAccess` 共用这一个词）。
+- 用户选的是父文件夹，App 在里面建一个以插件 id 命名的子目录。
+- 选完先校验（助手新建目录、试写、报剩余空间），再停掉在跑的服务、存配置。助手校验要 Python，所以机器上还没 Python 时先记下路径、装好 Python 再验。
+- 输入框改成只读；不再听客户端传来的路径，下载只用配置里那个。
+
+**踩过的坑（重要）**：子目录名一开始用插件的**显示名**「本地语音朗读」，结果服务彻底起不来：
+
+```
+Error processing file 'D:/a/espeakng-loader/.../phontab': No such file or directory.
+```
+
+**espeak-ng 的 dll 打开数据文件时用窄字符接口，路径里有非 ASCII 字符就找不到文件**。对照实验（同一个 venv，只改目录名）：`kokoro2` 正常、`本地语音朗读` 崩、ASCII 目录联接指过去也崩（dll 打开文件时联接被解析成真实路径）。
+
+所以：子目录名改用插件的 **id** `hana-local-tts`（ASCII），选文件夹时也挡掉含中文的路径，当场报错而不是等下完 5GB 才发现服务起不来。这条对「分享出去」尤其重要——中文用户名本来就会踩到。
+
+**实测**（宿主上跑的）：
+
+```
+PUT /kokoro-path  {root:"D:\\tmp\\hana-local-tts"}
+  -> {ok:true, root:"D:\\tmp\\hana-local-tts\\hana-local-tts", picked:"D:\\tmp\\hana-local-tts",
+      previous:"...\\kokoro2", checked:true, freeBytes:937716039680}
+kokoro-status -> model=true cpu=true gpu=true
+kokoro-start  -> ok，running=true device=cpu
+POST /probe    -> ok，status=done（真的合成出声）
+```
+
 ## 风险与代价清单
 
 | 风险 | 影响 | 对策 |
@@ -405,3 +437,4 @@ GPU 运行环境  已下载（PyTorch 2.14.1+cu130 CUDA 3.6G）
 - [x] M16-2 单段朗读超时：播放也放后台，避开宿主 30 秒 RPC 上限
 - [x] M16-3 冷启动也挪出 30 秒预算：合成前先保证服务在跑
 - [x] M17 设置页文案：状态说清楚「已下载（名字 大小）」，本地 Kokoro 改叫本地模型
+- [x] M18-1 数据目录改用宿主原生文件夹选择器；去掉写死的本机路径

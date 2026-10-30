@@ -311,6 +311,41 @@ def install_python(target_dir, state_dir):
     return {"installed": True, "version": version, "path": exe, "downloaded": True}
 
 
+def cmd_check_dir(argv):
+    """检查一个目录能不能用：建得出来、写得了、还剩多少空间。
+
+    用户在宿主里挑了一个文件夹，App 要在里面建一个自己的子目录。这个命令提前
+    把「建不了/写不了/空间不够」说出来，别等下了 5GB 才发现。
+    """
+    args, rest = parse_args(argv)
+    root = os.path.abspath(args.get("root") or (rest[0] if rest else "."))
+    try:
+        os.makedirs(root, exist_ok=True)
+    except Exception as error:
+        fail("建不了这个目录：%s" % error)
+    # 写一个临时文件试试真的写得了（目录在但没权限也会栽在这）。
+    probe = os.path.join(root, ".hana-write-test")
+    try:
+        with open(probe, "w", encoding="utf-8") as handle:
+            handle.write("ok")
+        os.remove(probe)
+    except Exception as error:
+        fail("这个目录写不了：%s" % error)
+    try:
+        usage = shutil.disk_usage(root)
+        free_bytes = usage.free
+        total_bytes = usage.total
+    except Exception:
+        free_bytes = 0
+        total_bytes = 0
+    emit({
+        "ok": True,
+        "root": root,
+        "freeBytes": free_bytes,
+        "totalBytes": total_bytes,
+    })
+
+
 def cmd_probe(argv):
     args, rest = parse_args(argv)
     root = os.path.abspath(args.get("root") or (rest[0] if rest else "."))
@@ -941,6 +976,7 @@ def cmd_hana_pid(argv):
 
 COMMANDS = {
     "probe": cmd_probe,
+    "check-dir": cmd_check_dir,
     "install": cmd_install,
     "sync": cmd_sync,
     "python-install": cmd_python_install,

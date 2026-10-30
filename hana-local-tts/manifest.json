@@ -2,12 +2,13 @@
   "manifestVersion": 2,
   "id": "hana-local-tts",
   "name": "\u672c\u5730\u8bed\u97f3\u6717\u8bfb",
-  "version": "0.9.12",
+  "version": "0.9.13",
   "entry": "index.js",
   "capabilities": [
     "app/process.spawn",
     "app/media.provide",
-    "app/media.generate"
+    "app/media.generate",
+    "app/resources.read"
   ],
   "contributes": {
     "ui": {

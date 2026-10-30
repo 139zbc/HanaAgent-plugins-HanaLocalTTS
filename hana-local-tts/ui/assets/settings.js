@@ -154,7 +154,8 @@ const pythonDress = dressSelect(pythonSource);
 const downloadModel = document.getElementById("download-model");
 const downloadCpu = document.getElementById("download-cpu");
 const downloadGpu = document.getElementById("download-gpu");
-const savePath = document.getElementById("save-path");
+const savePath = document.getElementById("browse-path");
+const hintPath = document.getElementById("hint-path");
 const errorSlots = {
   model: document.getElementById("error-model"),
   cpu: document.getElementById("error-cpu"),
@@ -373,7 +374,6 @@ async function startInstall(component) {
         source: component === "cpu" ? pipSource.value : component === "gpu" ? torchSource.value : installSource.value,
         pipSource: pipSource.value,
         torchSource: torchSource.value,
-        root: installRoot.value.trim(),
       }),
     });
     const body = await response.json().catch(() => ({}));
@@ -512,25 +512,54 @@ stopBtn.addEventListener("click", async () => {
   }
 });
 
+// 「浏览」：用宿主的原生文件夹选择器（和 Hana 设置页里那个是同一个对话框）。
+// 用户选的是父文件夹，App 会在里面建一个以插件命名的子目录。
 savePath.addEventListener("click", async () => {
   savePath.disabled = true;
+  showHint("");
+  showError("", "path");
   try {
+    const picked = await hana.resources.pick({ mode: "directory" }, { timeoutMs: 600000 });
+    const folder = picked && picked.resources && picked.resources[0] ? picked.resources[0].path : "";
+    // 用户取消：什么都没改，不报错。
+    if (!folder) return;
     const response = await hana.api.fetch("kokoro-path", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ root: installRoot.value.trim() }),
+      body: JSON.stringify({ root: folder }),
     });
     const body = await response.json().catch(() => ({}));
-    if (!response.ok || !body.ok) throw new Error(body.error || "路径没有保存。");
-    showError("", "path");
-    installRoot.value = body.root;
+    if (!response.ok || !body.ok) throw new Error(body.error || "目录没有保存。");
+    // 旧目录里的东西不会自动删，得说清楚。
+    const notes = [];
+    if (body.previous && body.previous !== body.root) {
+      notes.push(`旧目录 ${body.previous} 里的文件不会自动删除，需要的话请手工删掉。`);
+    }
+    const freeGB = Number(body.freeBytes || 0) / (1024 ** 3);
+    if (freeGB > 0 && freeGB < 6) {
+      notes.push(`这个盘只剩 ${freeGB.toFixed(1)}G 可用，模型和运行环境大概要 5G。`);
+    }
+    showHint(notes.join(" "));
     await loadKokoroStatus();
+    // 状态回来后再写一次路径：路由给的这个是最新的。
+    installRoot.value = body.root;
   } catch (error) {
-    showError(error instanceof Error ? error.message : "路径没有保存。", "path");
+    const message = error instanceof Error ? error.message : String(error);
+    // 宿主没给这个权限时，说清楚去哪儿开。
+    if (/denied|not granted|APP_CAPABILITY/i.test(message)) {
+      showError("宿主没给这个 App 文件夹选择权限。在「设置 → 安全 → 应用能力」里给「本地语音朗读」打开「读取文件」再试。");
+    } else {
+      showError(message || "目录没有保存。", "path");
+    }
   } finally {
     savePath.disabled = false;
   }
 });
+
+function showHint(text) {
+  hintPath.textContent = text || "";
+  hintPath.hidden = !text;
+}
 
 // ---- 状态区 ----
 
@@ -570,8 +599,8 @@ async function loadKokoroStatus() {
     const body = await response.json().catch(() => ({}));
     if (!response.ok || body.error) throw new Error(body.error || "读不到状态。");
 
-    installRoot.value = body.path || body.defaultPath || "";
-    document.getElementById("kokoro-path").textContent = body.path || "—";
+    installRoot.value = body.path || "还没选，点「浏览」选一个文件夹";
+    document.getElementById("kokoro-path").textContent = body.path || "还没选";
 
     showPiece("kokoro-model", body.modelReady, body.probeFailed, body.modelName, body.modelBytes);
     showPiece("kokoro-cpu", body.cpuReady, body.probeFailed, body.cpuName, body.cpuBytes);

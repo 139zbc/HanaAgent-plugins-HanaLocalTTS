@@ -89,6 +89,16 @@ body.page-locked .tts-select-trigger { pointer-events: none; }
   width: 100%;
 }
 
+/* 路径是只读的：能看能复制，不能改。要改就点「浏览」重新选。 */
+.path-row input[readonly] {
+  background: var(--overlay-subtle, rgba(0, 0, 0, 0.02));
+  color: var(--tts-text-2);
+}
+
+.path-row input[readonly]:hover {
+  background: var(--overlay-subtle, rgba(0, 0, 0, 0.02));
+}
+
 /* 下拉：对齐宿主设置页。触发条在行右侧，点开后是浮层，当前项用强调色。 */
 .tts-select { position: relative; width: 220px; max-width: 100%; }
 .tts-select.is-short { width: 112px; }
