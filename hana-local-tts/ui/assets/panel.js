@@ -116,14 +116,14 @@ function rateText(rate) {
 
 function renderPrefs(prefs) {
   const kokoro = prefs.engine === 'kokoro';
-  setValue(ui.engine, kokoro ? '本地 Kokoro' : 'Windows 系统语音');
+  setValue(ui.engine, kokoro ? '本地模型' : 'Windows 系统语音');
   setValue(ui.voice, kokoro
     ? kokoroVoiceName(prefs, prefs.kokoroVoices || [])
     : systemVoiceName(prefs, prefs.voices || []));
   setValue(ui.rate, rateText(prefs.rate));
 
   const bits = [
-    kokoro ? '本地 Kokoro' : '系统声音',
+    kokoro ? '本地模型' : '系统声音',
     kokoro ? kokoroVoiceName(prefs, prefs.kokoroVoices || []) : systemVoiceName(prefs, prefs.voices || []),
     rateText(prefs.rate),
   ];
@@ -163,7 +163,7 @@ function renderHint(prefs, state) {
   if (prefs && prefs.engine === 'kokoro') {
     lines.push('声音和语速在「多媒体 → 语音合成 → 本地语音朗读」里改。');
   } else if (prefs) {
-    lines.push('现在用的是 Windows 系统声音。要换成本地 Kokoro，去「多媒体 → 语音合成」里改朗读来源。');
+    lines.push('现在用的是 Windows 系统声音。要换成本地模型，去「多媒体 → 语音合成」里改朗读来源。');
   }
   // 读不到宿主那份时，显示的是 App 自己存的旧值，得说清楚。
   if (prefs && prefs.prefsSource === 'app') {

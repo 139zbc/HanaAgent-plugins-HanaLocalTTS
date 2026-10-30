@@ -2,7 +2,7 @@
   "manifestVersion": 2,
   "id": "hana-local-tts",
   "name": "\u672c\u5730\u8bed\u97f3\u6717\u8bfb",
-  "version": "0.9.11",
+  "version": "0.9.12",
   "entry": "index.js",
   "capabilities": [
     "app/process.spawn",
@@ -49,27 +49,27 @@
           },
           "kokoroVoice": {
             "type": "string",
-            "title": "Kokoro 声音",
+            "title": "本地模型声音",
             "default": "zf_094"
           },
           "kokoroRoot": {
             "type": "string",
-            "title": "Kokoro 安装路径",
+            "title": "本地模型数据目录",
             "default": ""
           },
           "kokoroAutoStop": {
             "type": "boolean",
-            "title": "Hana 退出时自动停止 Kokoro",
+            "title": "Hana 退出时自动停止本地模型服务",
             "default": true
           },
           "kokoroDevice": {
             "type": "string",
-            "title": "Kokoro 运行模式",
+            "title": "本地模型运行模式",
             "default": "cpu"
           },
           "kokoroSource": {
             "type": "string",
-            "title": "Kokoro 模型下载源",
+            "title": "本地模型下载源",
             "default": "modelscope"
           },
           "kokoroPythonSource": {

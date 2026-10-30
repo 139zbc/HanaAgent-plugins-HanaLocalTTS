@@ -9,15 +9,15 @@
 </head>
 <body>
   <main>
-    <p class="hint">朗读来源、声音和语速在 Hana 的「多媒体 → 语音合成 → 本地语音朗读」里设置。这里分开看模型、CPU 运行环境、GPU 运行环境。具备就能用，未下载就点下载。同一时间只跑一套。</p>
+    <p class="hint">朗读来源、声音和语速在 Hana 的「多媒体 → 语音合成 → 本地语音朗读」里设置。这里分开看模型、CPU 运行环境、GPU 运行环境。下载好就能用，没下载就点下载。同一时间只跑一套。</p>
 
     <section class="group">
-      <h2>本地 Kokoro</h2>
+      <h2>本地模型</h2>
       <div class="card">
         <div class="row">
           <div class="text">
             <span class="row-title">Python 运行环境</span>
-            <span class="row-desc" id="kokoro-python" data-state="loading">正在查看…</span>
+            <span class="row-desc" id="kokoro-python" data-state="loading">检测中…</span>
           </div>
           <span class="actions">
             <select id="python-source">
@@ -38,7 +38,7 @@
           <div class="row">
             <div class="text">
               <span class="row-title">模型</span>
-              <span class="row-desc" id="kokoro-model" data-state="loading">正在查看…</span>
+              <span class="row-desc" id="kokoro-model" data-state="loading">检测中…</span>
             </div>
             <span class="actions">
               <select id="install-source">
@@ -60,7 +60,7 @@
           <div class="row">
             <div class="text">
               <span class="row-title">CPU 运行环境</span>
-              <span class="row-desc" id="kokoro-cpu" data-state="loading">正在查看…</span>
+              <span class="row-desc" id="kokoro-cpu" data-state="loading">检测中…</span>
             </div>
             <span class="actions">
               <select id="pip-source">
@@ -82,7 +82,7 @@
           <div class="row">
             <div class="text">
               <span class="row-title">GPU 运行环境</span>
-              <span class="row-desc" id="kokoro-gpu" data-state="loading">正在查看…</span>
+              <span class="row-desc" id="kokoro-gpu" data-state="loading">检测中…</span>
             </div>
             <span class="actions">
               <select id="torch-source">
@@ -102,7 +102,7 @@
         <div class="row">
           <div class="text">
             <span class="row-title">运行状态</span>
-            <span class="row-desc" id="kokoro-running" data-state="loading">正在查看…</span>
+            <span class="row-desc" id="kokoro-running" data-state="loading">检测中…</span>
           </div>
           <span class="actions">
             <button id="kokoro-start" type="button" class="small" hidden>启动</button>
@@ -121,7 +121,7 @@
         <div class="row">
           <div class="text">
             <span class="row-title">运行模式</span>
-            <span class="row-desc" id="kokoro-device" data-state="loading">正在查看…</span>
+            <span class="row-desc" id="kokoro-device" data-state="loading">检测中…</span>
           </div>
           <span class="actions">
             <select id="device-select" hidden>
@@ -149,8 +149,8 @@
       <div class="card">
         <div class="row">
           <div class="text">
-            <span class="row-title">模型目录</span>
-            <span class="row-desc">模型装在这里。改路径后点保存。</span>
+            <span class="row-title">数据目录</span>
+            <span class="row-desc">模型及运行环境存储位置。改路径后点保存后生效。</span>
           </div>
         </div>
         <div class="row">
@@ -169,7 +169,7 @@
         <div class="row">
           <div class="text">
             <span class="row-title">注册状态</span>
-            <span class="row-desc" id="probe-status" role="status">正在查看能不能注册成语音供应商…</span>
+            <span class="row-desc" id="probe-status" role="status">正在检测能不能注册成语音供应商…</span>
           </div>
         </div>
         <div class="row">
@@ -180,6 +180,6 @@
       </div>
     </section>
   </main>
-  <script type="module" src="./assets/settings.js?v=13"></script>
+  <script type="module" src="./assets/settings.js?v=14"></script>
 </body>
 </html>

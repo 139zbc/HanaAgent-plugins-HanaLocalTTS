@@ -235,7 +235,7 @@ async function pollInstall() {
     showProgress(activeComponent, body.percent, body.message || body.phase);
     if (body.phase === "done") {
       stopPolling();
-      showProgress(activeComponent, 100, body.message || "已经具备。");
+      showProgress(activeComponent, 100, body.message || "已经下载好了。");
       setTimeout(() => location.reload(), 800);
     } else if (body.phase === "failed") {
       stopPolling();
@@ -534,21 +534,36 @@ savePath.addEventListener("click", async () => {
 
 // ---- 状态区 ----
 
-function showPiece(id, ready, failed) {
+function formatSize(bytes) {
+  const value = Number(bytes);
+  if (!Number.isFinite(value) || value <= 0) return "";
+  const mib = value / (1024 * 1024);
+  // 过了 1000M 就用 GB。纯按 1024 切的话，1016M 和 1.0G 是同一件事，两种写法都得认。
+  if (mib >= 1000) return `${(mib / 1024).toFixed(1)}G`;
+  return `${Math.round(mib)}M`;
+}
+
+function showPiece(id, ready, failed, name, bytes) {
   if (failed) {
     setRow(id, "bad", "读不到状态");
     return;
   }
-  setRow(id, ready ? "ok" : "bad", ready ? "具备" : "未下载");
+  if (!ready) {
+    setRow(id, "bad", "未下载");
+    return;
+  }
+  const size = formatSize(bytes);
+  const label = name ? `已下载（${name}${size ? ` ${size}` : ""}）` : "已下载";
+  setRow(id, "ok", label);
 }
 
 async function loadKokoroStatus() {
-  setRow("kokoro-model", "loading", "正在查看…");
-  setRow("kokoro-cpu", "loading", "正在查看…");
-  setRow("kokoro-gpu", "loading", "正在查看…");
-  setRow("kokoro-running", "loading", "正在查看…");
-  setRow("kokoro-device", "loading", "正在查看…");
-  setRow("kokoro-python", "loading", "正在查看…");
+  setRow("kokoro-model", "loading", "检测中…");
+  setRow("kokoro-cpu", "loading", "检测中…");
+  setRow("kokoro-gpu", "loading", "检测中…");
+  setRow("kokoro-running", "loading", "检测中…");
+  setRow("kokoro-device", "loading", "检测中…");
+  setRow("kokoro-python", "loading", "检测中…");
   document.getElementById("kokoro-path").textContent = "—";
   try {
     const response = await hana.api.fetch("kokoro-status");
@@ -558,9 +573,9 @@ async function loadKokoroStatus() {
     installRoot.value = body.path || body.defaultPath || "";
     document.getElementById("kokoro-path").textContent = body.path || "—";
 
-    showPiece("kokoro-model", body.modelReady, body.probeFailed);
-    showPiece("kokoro-cpu", body.cpuReady, body.probeFailed);
-    showPiece("kokoro-gpu", body.gpuReady, body.probeFailed);
+    showPiece("kokoro-model", body.modelReady, body.probeFailed, body.modelName, body.modelBytes);
+    showPiece("kokoro-cpu", body.cpuReady, body.probeFailed, body.cpuName, body.cpuBytes);
+    showPiece("kokoro-gpu", body.gpuReady, body.probeFailed, body.gpuName, body.gpuBytes);
     if (body.probeFailed) {
       showError(body.probeError || "读不到状态。", "model");
       showError("", "cpu");

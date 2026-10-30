@@ -180,7 +180,7 @@ function failureText(error, label = "朗读失败") {
     return `${label}：App 进程被宿主限制了（${what}）。请在设置 → 应用能力里允许「启动进程」，然后重新加载这个 App。`;
   }
   if (code === "ETIMEDOUT" || /timed out/i.test(raw)) {
-    if (error && error.kokoro) return "本地 Kokoro 没能在限定时间内启动或读完。请再点一次。";
+    if (error && error.kokoro) return "本地模型没能在限定时间内启动或读完。请再点一次。";
     if (label !== "朗读失败") return `${label}：超过了等待时间。`;
     return "这句话太长，系统语音没能在限定时间内读完。请换短一点的消息。";
   }
@@ -210,7 +210,7 @@ function defaultKokoroRoot() {
 
 async function kokoroStatus(sdk) {
   const root = await kokoroRoot(sdk);
-  const result = { installed: false, modelReady: false, cpuReady: false, gpuReady: false, dirGB: null, running: false, foreign: false, device: "", serviceRoot: "", path: root, defaultPath: defaultKokoroRoot(), autoStop: await autoStopEnabled(sdk), targetDevice: await kokoroDevice(sdk), probeFailed: false, probeError: "" };
+  const result = { installed: false, modelReady: false, cpuReady: false, gpuReady: false, dirGB: null, running: false, foreign: false, device: "", serviceRoot: "", path: root, defaultPath: defaultKokoroRoot(), autoStop: await autoStopEnabled(sdk), targetDevice: await kokoroDevice(sdk), probeFailed: false, probeError: "", modelName: "", modelBytes: 0, cpuName: "", cpuBytes: 0, gpuName: "", gpuBytes: 0 };
   // Python 那一行不用助手：机器上可能一个 Python 都没有，助手跑不起来。
   const portable = await portablePythonState(sdk, sdk.dataDir);
   result.pythonReady = portable.ready === true;
@@ -223,6 +223,13 @@ async function kokoroStatus(sdk) {
     result.cpuReady = parsed.cpu === true;
     result.gpuReady = parsed.gpu === true;
     if (typeof parsed.dirGB === "number") result.dirGB = parsed.dirGB;
+    // 三份各自的名字和大小，设置页显示「已下载（名字 大小）」。
+    if (typeof parsed.modelName === "string") result.modelName = parsed.modelName;
+    if (typeof parsed.modelBytes === "number") result.modelBytes = parsed.modelBytes;
+    if (typeof parsed.cpuName === "string") result.cpuName = parsed.cpuName;
+    if (typeof parsed.cpuBytes === "number") result.cpuBytes = parsed.cpuBytes;
+    if (typeof parsed.gpuName === "string") result.gpuName = parsed.gpuName;
+    if (typeof parsed.gpuBytes === "number") result.gpuBytes = parsed.gpuBytes;
     result.running = parsed.running === true;
     result.foreign = parsed.foreign === true;
     if (typeof parsed.device === "string") result.device = parsed.device;
@@ -549,7 +556,7 @@ function speechModelSnapshot() {
           },
           {
             id: "kokoro",
-            displayName: "本地 Kokoro",
+            displayName: "本地模型",
             protocolId: PROTOCOL_ID,
             defaultVoiceId: KOKORO_DEFAULT_VOICE,
             voices: KOKORO_VOICES.map((item) => ({ id: item.id, displayName: item.label })),
@@ -1171,9 +1178,9 @@ export default defineApp(async (sdk) => {
           }
         }
         const status = await kokoroStatus(sdk);
-        if (component === "model" && status.modelReady) return c.json({ ok: false, error: "模型已经具备。" }, 400);
-        if (component === "cpu" && status.cpuReady) return c.json({ ok: false, error: "CPU 运行环境已经具备。" }, 400);
-        if (component === "gpu" && status.gpuReady) return c.json({ ok: false, error: "GPU 运行环境已经具备。" }, 400);
+        if (component === "model" && status.modelReady) return c.json({ ok: false, error: "模型已经下载好了。" }, 400);
+        if (component === "cpu" && status.cpuReady) return c.json({ ok: false, error: "CPU 运行环境已经下载好了。" }, 400);
+        if (component === "gpu" && status.gpuReady) return c.json({ ok: false, error: "GPU 运行环境已经下载好了。" }, 400);
         if (component === "gpu") {
           const gpu = await checkGpuHardware(sdk);
           if (!gpu.ok) return c.json({ ok: false, error: gpu.error }, 400);

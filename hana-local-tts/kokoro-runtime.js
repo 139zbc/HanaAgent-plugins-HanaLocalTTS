@@ -57,8 +57,12 @@ export function childEnv(dataDir) {
   };
 }
 
-export function helperSource() {
-  return Buffer.from(HELPER_PY_B64, "base64").toString("utf8");
+// 助手源码落在 App 数据目录里的位置。
+//
+// 以前是把整份源码塞进 `python -c <源码>`，但 Windows 的命令行上限是 32767 个字符，
+// 源码一涨就报 spawn ENAMETOOLONG。写成文件再跑就没有这个上限了。
+export function helperPath(dataDir) {
+  return path.join(dataDir, "helper.py");
 }
 
 // existsSync 在权限模型下会抛异常，不是返回 false。
@@ -208,9 +212,10 @@ export async function runHelper(sdk, dataDir, args, options = {}) {
   if (python.kind === "none") {
     throw new Error(`找不到能用的 Python（${python.attempts.join("；")}）。需要 3.8 以上，3.12 最稳。`);
   }
+  await writeAppSources(dataDir);
   const { stdout, stderr } = await runCommand(
     python.command,
-    [...python.args, "-c", helperSource(), ...args],
+    [...python.args, helperPath(dataDir), ...args],
     dataDir,
     options.timeoutMs || 30000,
   );
@@ -407,9 +412,9 @@ async function finishPythonInstall(sdk, dataDir, archive) {
   });
 }
 
-// 把 server.py / install.py 放进 App 数据目录，助手会搬到安装目录再跑。
+// 把 server.py / install.py / helper.py 放进 App 数据目录，助手会搬到安装目录再跑。
 export async function writeAppSources(dataDir) {
-  for (const [name, b64] of [["server.py", SERVER_PY_B64], ["install.py", INSTALL_PY_B64]]) {
+  for (const [name, b64] of [["server.py", SERVER_PY_B64], ["install.py", INSTALL_PY_B64], ["helper.py", HELPER_PY_B64]]) {
     const target = path.join(dataDir, name);
     const wanted = Buffer.from(b64, "base64");
     try {
@@ -436,8 +441,7 @@ export async function startInstall(sdk, dataDir, options) {
   }
   const args = [
     ...python.args,
-    "-c",
-    helperSource(),
+    helperPath(dataDir),
     "install",
     "--root", options.root,
     "--app-dir", dataDir,
@@ -463,7 +467,8 @@ export async function spawnDetached(sdk, dataDir, args) {
   if (python.kind === "none") {
     throw new Error(`找不到能用的 Python（${python.attempts.join("；")}）。`);
   }
-  const child = spawn(python.command, [...python.args, "-c", helperSource(), ...args], {
+  await writeAppSources(dataDir);
+  const child = spawn(python.command, [...python.args, helperPath(dataDir), ...args], {
     cwd: dataDir,
     env: childEnv(dataDir),
     stdio: "ignore",

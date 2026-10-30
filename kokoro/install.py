@@ -742,7 +742,7 @@ def verify(root: Path, vpython: Path, device: str) -> None:
 def install_model(root: Path, base_python: str, source: str, pip_source: str, voice: str) -> None:
     # 权重已在本地就不再下一遍：老用户升级、或者重复点「下载」，都从这里直接返回。
     if model_file(root).exists():
-        write_state(root, "done", "模型已具备", 100)
+        write_state(root, "done", "模型已下载", 100)
         return
     python = python_for_download(root, base_python, pip_source)
     if source == "modelscope":
@@ -751,7 +751,7 @@ def install_model(root: Path, base_python: str, source: str, pip_source: str, vo
         download_hf(root, python, mirror=source == "hf-mirror", voice=voice)
     if not model_file(root).exists():
         raise RuntimeError("下载结束但没有找到模型文件")
-    write_state(root, "done", "模型已具备", 100)
+    write_state(root, "done", "模型已下载", 100)
 
 
 def install_runtime(root: Path, base_python: str, device: str, pip_source: str, torch_source: str) -> None:
@@ -771,7 +771,7 @@ def install_runtime(root: Path, base_python: str, device: str, pip_source: str, 
         write_state(root, "verify", "运行环境已装好。模型还是未下载，跳过加载验证。", 90)
     mark_runtime(venv_dir, device)
     label = "GPU" if device == "cuda" else "CPU"
-    write_state(root, "done", f"{label} 运行环境已具备", 100)
+    write_state(root, "done", f"{label} 运行环境已下载", 100)
 
 
 def main() -> None:

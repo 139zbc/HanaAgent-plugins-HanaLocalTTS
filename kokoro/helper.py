@@ -106,15 +106,47 @@ def model_ready(root):
     return False
 
 
-def dir_gb(root):
+def measure_dirs(root, components):
+    """一次遍历算出根目录的总大小和各子目录的大小。
+
+    components 是 [(名字, 目录)] 的列表。子目录的大小不跟随软链：
+    HF 缓存的快照里是指向 blobs 的软链，跟着算会算两遍。
+    总大小跟旧算法一致（跟随软链），免得 dirGB 变样。
+    """
     total = 0
+    sizes = {name: 0 for name, _ in components}
+    prefixes = [(name, os.path.abspath(path)) for name, path in components if path]
     for base, _dirs, files in os.walk(root):
         for name in files:
+            full = os.path.join(base, name)
             try:
-                total += os.path.getsize(os.path.join(base, name))
+                if os.path.islink(full):
+                    total += os.path.getsize(full)
+                    continue
+                size = os.path.getsize(full)
             except OSError:
-                pass
-    return round(total / (1024 ** 3), 1)
+                continue
+            total += size
+            for label, prefix in prefixes:
+                if full.startswith(prefix + os.sep):
+                    sizes[label] += size
+                    break
+    return total, sizes
+
+
+def torch_version(venv):
+    """环境里装的 torch 版本（带 +cu 的是 CUDA 版）。"""
+    if not venv:
+        return ""
+    site = os.path.join(venv, "Lib", "site-packages")
+    try:
+        names = os.listdir(site)
+    except OSError:
+        return ""
+    for name in names:
+        if name.startswith("torch-") and name.endswith(".dist-info"):
+            return name[len("torch-"):-len(".dist-info")]
+    return ""
 
 
 def service_state():
@@ -282,13 +314,21 @@ def install_python(target_dir, state_dir):
 def cmd_probe(argv):
     args, rest = parse_args(argv)
     root = os.path.abspath(args.get("root") or (rest[0] if rest else "."))
-    cpu = marked_device(os.path.join(root, ".venv-cpu")) == "cpu"
-    gpu = marked_device(os.path.join(root, ".venv-cuda")) == "cuda"
-    legacy = legacy_device(os.path.join(root, ".venv"))
+    cpu_venv = os.path.join(root, ".venv-cpu")
+    gpu_venv = os.path.join(root, ".venv-cuda")
+    legacy_venv = os.path.join(root, ".venv")
+    cpu = marked_device(cpu_venv) == "cpu"
+    gpu = marked_device(gpu_venv) == "cuda"
+    legacy = legacy_device(legacy_venv)
     if not cpu:
         cpu = legacy == "cpu"
     if not gpu:
         gpu = legacy == "cuda"
+    # 实际在用的目录：老环境（.venv）只算一份，别把同一份报两次。
+    if cpu and marked_device(cpu_venv) != "cpu":
+        cpu_venv = legacy_venv if legacy == "cpu" else ""
+    if gpu and marked_device(gpu_venv) != "cuda":
+        gpu_venv = legacy_venv if legacy == "cuda" else ""
     model = model_ready(root)
     state = read_json(os.path.join(root, "install-state.json"))
     if isinstance(state, dict):
@@ -303,11 +343,29 @@ def cmd_probe(argv):
                 gpu = False
     service = service_state()
     foreign = service["running"] and service["root"] and not same_path(service["root"], root)
+    # 三份各自的名字和大小，页面显示「已下载（名字 大小）」。
+    model_dir = os.path.join(root, "hf-cache", MODEL_DIR)
+    if os.path.isdir(root):
+        total, sizes = measure_dirs(root, [
+            ("model", model_dir),
+            ("cpu", cpu_venv),
+            ("gpu", gpu_venv),
+        ])
+        dir_gb = round(total / (1024 ** 3), 1)
+    else:
+        sizes = {"model": 0, "cpu": 0, "gpu": 0}
+        dir_gb = None
     emit({
         "model": model,
         "cpu": cpu,
         "gpu": gpu,
-        "dirGB": dir_gb(root) if os.path.isdir(root) else None,
+        "modelName": MODEL_DIR.split("--")[-1],
+        "modelBytes": sizes["model"] if model else 0,
+        "cpuName": ("PyTorch %s CPU" % torch_version(cpu_venv)).strip() if cpu else "",
+        "cpuBytes": sizes["cpu"] if cpu else 0,
+        "gpuName": ("PyTorch %s CUDA" % torch_version(gpu_venv)).strip() if gpu else "",
+        "gpuBytes": sizes["gpu"] if gpu else 0,
+        "dirGB": dir_gb,
         "running": service["running"],
         "device": service["device"],
         # 服务自己报的目录。换过安装路径后它和当前目录不一样，停止时要用它。
