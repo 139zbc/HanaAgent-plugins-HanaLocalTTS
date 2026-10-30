@@ -691,7 +691,115 @@ def wait_pid_exit(pid: int) -> None:
         ctypes.windll.kernel32.CloseHandle(handle)
 
 
-def start_service(root: str, device: str, wait: bool = True, temp_dir: str = "") -> dict:
+def load_token(path: str) -> str:
+    """读 App 数据目录里的令牌。短的、空的、不是十六进制的都不算。"""
+    data = read_json(path) if path else None
+    if not isinstance(data, dict):
+        return ""
+    token = str(data.get("token") or "")
+    if not re.fullmatch(r"[a-f0-9]{64}", token):
+        return ""
+    return token
+
+
+def command_line_is_server(command_line: str, root: str) -> bool:
+    """命令行里是不是这个数据目录下的 server.py。必须整段路径对上，不用模糊匹配。"""
+    if not command_line or not root:
+        return False
+    server = os.path.normcase(os.path.abspath(os.path.join(root, "server.py")))
+    text = os.path.normcase(command_line)
+    start = 0
+    while True:
+        index = text.find(server, start)
+        if index < 0:
+            return False
+        before = text[index - 1] if index else ""
+        end = index + len(server)
+        after = text[end] if end < len(text) else ""
+        if before in ("", " ", "\t", '"', "'") and after in ("", " ", "\t", '"', "'"):
+            return True
+        start = index + 1
+
+
+def python_processes() -> list:
+    """本机 python.exe 的 pid 和完整命令行。匹配放在 Python 里做，不把目录拼进脚本。"""
+    script = (
+        "Get-CimInstance Win32_Process -Filter \"Name = 'python.exe'\" -ErrorAction SilentlyContinue "
+        "| Select-Object ProcessId, CommandLine | ConvertTo-Json -Compress"
+    )
+    try:
+        result = subprocess.run(
+            [powershell_exe(), "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, timeout=30,
+        )
+    except Exception:
+        return []
+    raw = (result.stdout or "").strip()
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    rows = parsed if isinstance(parsed, list) else [parsed]
+    found = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            pid = int(row.get("ProcessId") or 0)
+        except (TypeError, ValueError):
+            continue
+        command = row.get("CommandLine") or ""
+        if pid > 0 and isinstance(command, str) and command:
+            found.append((pid, command))
+    return found
+
+
+def pids_for_server(root: str) -> list:
+    return [pid for pid, command in python_processes() if command_line_is_server(command, root)]
+
+
+def listening_pid(port: int) -> int:
+    """谁在听这个端口。对不上我们的 server.py 时，不会向它发关闭。"""
+    try:
+        result = subprocess.run(
+            ["netstat", "-ano", "-p", "tcp"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except Exception:
+        return 0
+    suffix = ":%d" % port
+    for line in (result.stdout or "").splitlines():
+        if "LISTENING" not in line.upper():
+            continue
+        parts = line.split()
+        if len(parts) < 5 or not parts[1].endswith(suffix):
+            continue
+        try:
+            return int(parts[-1])
+        except ValueError:
+            return 0
+    return 0
+
+
+def request_shutdown(token: str) -> bool:
+    if not token:
+        return False
+    try:
+        request = urllib.request.Request(
+            "http://127.0.0.1:%d/shutdown" % PORT,
+            data=b"",
+            method="POST",
+            headers={"X-Kokoro-Token": token},
+        )
+        urllib.request.urlopen(request, timeout=5).read()
+        return True
+    except Exception:
+        return False
+
+
+def start_service(root: str, device: str, wait: bool = True, temp_dir: str = "", token: str = "") -> dict:
     state = service_state()
     if state["running"]:
         return {"started": False, "running": True, "device": state["device"], "pid": 0}
@@ -705,7 +813,10 @@ def start_service(root: str, device: str, wait: bool = True, temp_dir: str = "")
     os.makedirs(tmp, exist_ok=True)
     # 服务每跑一次会在 TEMP 里攒一份 espeak-ng.dll 的副本。起服务前先把旧的清掉。
     cleanup_temp(tmp, 60)
+    if not token:
+        fail("没有本地服务令牌，服务不会在没有令牌的情况下启动。")
     env = os.environ.copy()
+    env["KOKORO_TOKEN"] = token
     env["KOKORO_DEVICE"] = device
     env["HF_HUB_CACHE"] = os.path.join(root, "hf-cache")
     env["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
@@ -761,64 +872,38 @@ def start_service(root: str, device: str, wait: bool = True, temp_dir: str = "")
     fail("本地 Kokoro 启动超时。请再点一次朗读。")
 
 
-def _service_pids_by_command(root: str) -> list:
-    """按命令行找跑着这个目录 server.py 的进程。
+def stop_service(root: str, token: str = "") -> dict:
+    """只停这个数据目录下的 server.py。
 
-    服务升级前启动的老进程没有 pid 文件，也不懂 /shutdown，只能这样扫。
+    关闭请求只发给命令行已经对上的那个监听进程。pid 文件里的数字也要先核对命令行，
+    对不上就不杀。不再按 /health 报的目录，也不再用模糊匹配去扫别的 Python。
     """
-    needle = os.path.abspath(root).replace("'", "''")
-    script = (
-        "$ids = @(Get-CimInstance Win32_Process -Filter \"Name = 'python.exe'\" -ErrorAction SilentlyContinue "
-        "| Where-Object { $_.CommandLine -and $_.CommandLine -like '*%s*' } "
-        "| Select-Object -ExpandProperty ProcessId); $ids -join ','" % needle
-    )
-    try:
-        result = subprocess.run(
-            [powershell_exe(), "-NoProfile", "-NonInteractive", "-Command", script],
-            capture_output=True, text=True, timeout=30,
-        )
-    except Exception:
-        return []
-    pids = []
-    for item in (result.stdout or "").strip().split(","):
-        item = item.strip()
-        if item.isdigit():
-            pids.append(int(item))
-    return pids
-
-
-def stop_service(root: str) -> dict:
-    """先请服务自己退；不行再按 pid 文件杀进程树；还不行就按命令行扫。"""
     stopped = []
-    try:
-        request = urllib.request.Request(
-            "http://127.0.0.1:%d/shutdown" % PORT, method="POST", data=b"",
-        )
-        urllib.request.urlopen(request, timeout=5).read()
-        stopped.append("shutdown")
-    except Exception:
-        pass
+    ours = set(pids_for_server(root))
     pid_file = os.path.join(root, "kokoro.pid")
-    pid = 0
+    file_pid = 0
     try:
         with open(pid_file, "r", encoding="utf-8") as handle:
-            pid = int((handle.read() or "0").strip() or 0)
+            file_pid = int((handle.read() or "0").strip() or 0)
     except (OSError, ValueError):
-        pid = 0
-    if pid and pid_alive(pid):
-        if not _taskkill(pid):
-            _stop_process(pid)
-        stopped.append(str(pid))
+        file_pid = 0
+    if file_pid and pid_alive(file_pid):
+        matched = any(pid == file_pid and command_line_is_server(command, root) for pid, command in python_processes())
+        if matched:
+            ours.add(file_pid)
+    listener = listening_pid(PORT)
+    if listener and listener in ours and request_shutdown(token):
+        stopped.append("shutdown")
+        time.sleep(0.5)
+    for pid in sorted(ours):
+        if not pid_alive(pid):
+            continue
+        if _taskkill(pid) or _stop_process(pid):
+            stopped.append(str(pid))
     try:
         os.remove(pid_file)
     except OSError:
         pass
-    if service_state()["running"]:
-        # 服务还在：可能是升级前的老进程，按命令行找出来杀掉。
-        for other in _service_pids_by_command(root):
-            if not _taskkill(other):
-                _stop_process(other)
-            stopped.append(str(other))
     return {"stopped": stopped}
 
 
@@ -849,13 +934,16 @@ def cmd_start(argv):
     root = os.path.abspath(args.get("root") or ".")
     device = args.get("device") or "cpu"
     wait = (args.get("wait") or "1").lower() not in ("0", "false", "no")
-    emit(start_service(root, device, wait=wait, temp_dir=args.get("temp-dir") or ""))
+    emit(start_service(
+        root, device, wait=wait, temp_dir=args.get("temp-dir") or "",
+        token=load_token(args.get("token-file") or ""),
+    ))
 
 
 def cmd_stop(argv):
     args, rest = parse_args(argv)
     root = os.path.abspath(args.get("root") or ".")
-    emit(stop_service(root))
+    emit(stop_service(root, load_token(args.get("token-file") or "")))
 
 
 def cmd_watch(argv):
@@ -876,7 +964,7 @@ def cmd_watch(argv):
         # 用户把「自动停止」关了，就不动服务。
         return
     try:
-        stop_service(root)
+        stop_service(root, load_token(args.get("token-file") or ""))
     except Exception:
         pass
     if pid_file:
@@ -946,16 +1034,19 @@ def cmd_speak(argv):
     out_file = os.path.abspath(args.get("out") or "")
     voice = args.get("voice") or ""
     speed = args.get("speed") or "1"
+    token = load_token(args.get("token-file") or "")
+    if not token:
+        fail("没有本地服务令牌。")
     with open(text_file, "r", encoding="utf-8") as handle:
         text = handle.read().strip()
     state = service_state()
     if not state["running"]:
-        state = start_service(root, device, wait=True)
+        state = start_service(root, device, wait=True, token=token)
     payload = json.dumps({"input": text, "voice": voice, "speed": float(speed)}).encode("utf-8")
     request = urllib.request.Request(
         "http://127.0.0.1:%d/v1/audio/speech" % PORT,
         data=payload,
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "X-Kokoro-Token": token},
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=180) as response:

@@ -423,6 +423,34 @@ POST /probe    -> ok，status=done（真的合成出声）
 
 **实测**：重载后 `kokoro watcher started` 正常出现（修之前连续 8 次重载都没起来）；种一个 3 小时前的临时目录，重载后被清掉，日志 `cleaned 3 temp dirs`。存量清了一遍：删了 84 个目录、释放 33 MB。
 
+### M20：代码评审要修的问题（2026-10-30 写入，还没动代码）
+
+两轮评审对过代码之后的修法。一次只做一小步，做完先确认，再用 Git 存档。
+
+**不做什么**：
+- 不改适配器 `submit` 的文本长度。32KB 上限仍只在工具 `hana_local_tts_speak` 里检查，这条用户明确不改。
+- 不把 `index.js` 拆成多个文件。只删重复和没人用的代码。
+- 不改声音、语速、安装源的产品行为，除了下面点名的那几处。
+
+**令牌长什么样**（放在 App 数据目录，不进 Git）：`{ "token": "一串随机字符", "port": 8765 }`。请求头带上这串才接受关闭和合成。
+
+| 步骤 | 做什么 | 改哪些文件 | 怎么验收 |
+|---|---|---|---|
+| M20-1 | 本机服务加令牌。只停设置里保存的那个数据目录。杀进程前核对命令行就是这份 `server.py`，不用模糊匹配，也不凭 `/health` 报上来的目录去杀。 | `kokoro/server.py`、`kokoro/helper.py`、`hana-local-tts/index.js` | 不带令牌的关闭和合成被拒绝。点「停止」只停自己这份。别的 Python 进程还在。 |
+| M20-2 | 启动超时或启动失败时杀掉刚拉起的那份进程。再次启动前先按数据目录找已有的 `server.py`，有就复用或先停，不要只看端口。 | `kokoro/helper.py` | 模型还在加载时连点两次启动，最终只留一个 `server.py`。 |
+| M20-3 | 合成串行。服务端一把锁包住整段推理。客户端再加一把「正在朗读」，新的请求排队或明确拒绝。 | `kokoro/server.py`、`hana-local-tts/index.js`、`hana-local-tts/ui/assets/panel.js` | 面板试听和消息「朗读」叠在一起时，不会两路同时进模型。 |
+| M20-4 | 英文声音名单和下载规则用同一份。`af_maple`、`af_sol`、`bf_vale` 要么能下到，要么从对外列表拿掉。不能安装时悄悄改成 `zf_094`。 | `hana-local-tts/kokoro-voices.js`、`kokoro/helper.py`、`kokoro/install.py` | 选 Maple 时不再报声音名不对；安装模型时下的就是选中的那个声音。 |
+| M20-5 | 分段播放失败时删掉还没播的 wav。失败要能在面板上看到，不能只写进日志，也不能先说「已开始朗读」。 | `hana-local-tts/index.js`、`hana-local-tts/ui/assets/panel.js` | 播放失败后，生成目录里不留下一段的 wav；面板出现失败原因。 |
+| M20-6 | 状态里的体积不再每次把整个数据目录走一遍。大小记在文件里，安装完成或启动时更新。平时只检查标记文件和 `/health`。 | `kokoro/helper.py`、`hana-local-tts/index.js` | 打开面板或设置页时，不再为了算体积扫几 GB 的 venv。显示的大小仍然在。 |
+| M20-7 | 朗读前核对 8765 上的服务是不是这次的数据目录。不一致就先停掉旧的，或直接失败并说明端口被谁占着。 | `kokoro/helper.py` | 换过数据目录、旧进程还占着端口时，不会用错模型还报成功。 |
+| M20-8 | 便携版 Python 下完核对哈希，通过才解压。下载加总超时，curl 的进度输出不要塞满管道。状态里记下 pid，进程不在了就改成失败，允许再下。两次点击不要同时写同一个压缩包。 | `kokoro/helper.py`、`hana-local-tts/kokoro-runtime.js` | 哈希不对就不解压、不运行。下载卡死后，再点一次能重新开始。 |
+| M20-9 | 守护进程退出后清掉「已经拉起」的标记，下次能再拉。`spawn` 接上错误，不要把 App 进程打崩。打不开 Hana 进程句柄时记日志，不要因此就停服务。 | `hana-local-tts/index.js`、`hana-local-tts/kokoro-runtime.js`、`kokoro/helper.py` | 把守护进程杀掉后再进设置或再朗读，守护会再起来。Hana 退出后服务仍能停。 |
+| M20-10 | 安装用数据目录里的锁文件加 pid，不靠内存里的时间戳。App 重载后仍然能挡住第二个安装。pip 被杀掉之后要等它退出，再重试。 | `hana-local-tts/index.js`、`kokoro/install.py`、`kokoro/helper.py` | 下载进行中再点一次，或重载 App 再点，不会起两个安装进程。 |
+| M20-11 | 交给 Python、pip、curl 的环境变量改成白名单：`SystemRoot`、`PATH`、`TEMP`、`TMP`、`USERPROFILE`、`HOME`、`APPDATA`、`LOCALAPPDATA`，再加上 Python 自己要的编码变量。不要把当前进程的全部环境传下去。 | `hana-local-tts/kokoro-runtime.js` | 下载、安装、启动、朗读仍能跑。子进程环境里没有多余的令牌变量。 |
+| M20-12 | 轻微清理。删掉写了两遍的 `service_state` 和没人用的 `PYTHON_VERSION`。改掉 `kokoro-files.js` 里那句过时注释。超过 2000 字回错误，不再默默切掉。日志超过一定大小就换新文件。设置页解锁时不要把「还没选目录」禁掉的按钮又打开。切段少做无用的重复计数。 | `kokoro/helper.py`、`kokoro/server.py`、`hana-local-tts/kokoro-runtime.js`、`scripts/embed-kokoro.mjs`、`hana-local-tts/index.js`、`hana-local-tts/ui/assets/settings.js` | 直接向服务送超过 2000 字的文本会报错，不会少读一截。设置页在没选目录时，下载按钮仍然不能点。 |
+
+改完 Python 之后要重新跑 `node scripts/embed-kokoro.mjs`，否则 App 跑的还是内嵌的旧副本。
+
 ## 风险与代价清单
 
 | 风险 | 影响 | 对策 |
@@ -478,3 +506,15 @@ POST /probe    -> ok，status=done（真的合成出声）
 - [x] M18-1 数据目录改用宿主原生文件夹选择器；去掉写死的本机路径
 - [x] M18-2 首次进入设置页的强制引导（先选数据目录）+ 面板文案
 - [x] M19 临时目录自动清理（起服务时 + 每 30 分钟）；顺带修掉守护进程在重载后失效的回归
+- [x] M20-1 本机服务加令牌；停止时只杀自己这份数据目录下的 server.py（用户已验收）
+- [ ] M20-2 启动失败要回收子进程；再次启动先找已有进程
+- [ ] M20-3 合成串行：服务端上锁，客户端朗读互斥
+- [ ] M20-4 英文声音名单和下载规则对齐
+- [ ] M20-5 分段失败删掉未播的 wav，失败显示在面板上
+- [ ] M20-6 状态体积改成记下来，不再每次扫整个目录
+- [ ] M20-7 朗读前核对 8765 上是不是这份数据目录
+- [ ] M20-8 便携版 Python：哈希、总超时、卡死后能再下
+- [ ] M20-9 守护进程退出后能再拉；spawn 接上错误
+- [ ] M20-10 安装用锁文件；pip 杀掉后要等它退出
+- [ ] M20-11 子进程环境变量改成白名单
+- [ ] M20-12 轻微清理（重复函数、过时注释、日志轮转、超长报错、设置页解锁）

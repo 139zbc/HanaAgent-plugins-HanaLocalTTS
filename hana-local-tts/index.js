@@ -918,10 +918,30 @@ async function pythonSource(sdk) {
   }
 }
 
+// 本地服务的令牌。放在 App 自己的数据目录里，不进 Git，也不写进命令行。
+const SERVICE_TOKEN_NAME = "kokoro-token.json";
+const SERVICE_PORT = 8765;
+
+async function ensureServiceTokenFile(dataDir) {
+  const file = path.join(dataDir, SERVICE_TOKEN_NAME);
+  try {
+    const parsed = JSON.parse(await readFile(file, "utf8"));
+    if (parsed && typeof parsed.token === "string" && /^[a-f0-9]{64}$/.test(parsed.token)) return file;
+  } catch {
+    // 还没有，或内容坏了，下面重新生成。
+  }
+  const token = randomBytes(32).toString("hex");
+  await mkdir(dataDir, { recursive: true });
+  await writeFile(file, JSON.stringify({ token, port: SERVICE_PORT }), "utf8");
+  return file;
+}
+
 // 所有调助手的地方都走这里，Python 来源设置才能统一生效。
+// 令牌文件路径一并带上。值本身留在文件里，进程列表里看不到。
 async function runKokoroHelper(sdk, args, options = {}) {
   const source = await pythonSource(sdk);
-  return runHelper(sdk, sdk.dataDir, args, { ...options, source });
+  const tokenFile = await ensureServiceTokenFile(sdk.dataDir);
+  return runHelper(sdk, sdk.dataDir, [...args, "--token-file", tokenFile], { ...options, source });
 }
 
 async function cleanupOrphanKokoro(sdk) {
@@ -986,7 +1006,7 @@ async function readKokoroLive(sdk) {
 }
 
 async function stopKokoroService(sdk, rootOverride) {
-  // rootOverride：服务在别的目录跑的时候（比如换过安装路径），按它自己的目录找进程。
+  // rootOverride 只能是我们自己存过的数据目录，不能用 /health 报上来的目录。
   const root = rootOverride || (await kokoroRoot(sdk));
   // 还没选过目录就没什么可停的。
   if (!root) return { ok: true, stopped: [] };
@@ -1070,6 +1090,7 @@ async function ensureWatcher(sdk) {
   const flag = autoStopFlagPath(sdk);
   await mkdir(path.dirname(flag), { recursive: true });
   await writeFile(flag, String(hanaPid), "utf8");
+  const tokenFile = await ensureServiceTokenFile(sdk.dataDir);
   try {
     watcherChild = await spawnDetached(sdk, sdk.dataDir, [
       "watch",
@@ -1077,6 +1098,7 @@ async function ensureWatcher(sdk) {
       "--pid", String(hanaPid),
       "--flag", flag,
       "--pid-file", watcherPidPath(sdk),
+      "--token-file", tokenFile,
     ]);
     watcherRunning = true;
     await writeSessionMarker(sdk, hanaPid);
@@ -1335,20 +1357,16 @@ export default defineApp(async (sdk) => {
         }
         await sdk.logger.info("kokoro path saved without check: no python yet");
       }
-      // 换目录前先把在跑的服务停掉：它占着 8765，而且加载的是旧目录里的模型。
+      // 换目录前先停旧目录里我们自己的服务。不按 /health 报的目录去停。
       let stopped = [];
-      try {
-        const status = await kokoroStatus(sdk);
-        if (status.running) {
-          const target = status.serviceRoot || previous;
-          if (target) {
-            const result = await stopKokoroService(sdk, target);
-            stopped = result.stopped || [];
-            await sdk.logger.info(`kokoro stopped before path change: ${stopped.join(",") || "none"}`);
-          }
+      if (previous && previous !== root) {
+        try {
+          const result = await stopKokoroService(sdk, previous);
+          stopped = result.stopped || [];
+          await sdk.logger.info(`kokoro stopped before path change: ${stopped.join(",") || "none"}`);
+        } catch (error) {
+          await sdk.logger.error(`kokoro stop before path change failed: ${failureText(error)}`);
         }
-      } catch (error) {
-        await sdk.logger.error(`kokoro stop before path change failed: ${failureText(error)}`);
       }
       try {
         await sdk.config.setMany({ kokoroRoot: root });
@@ -1369,8 +1387,8 @@ export default defineApp(async (sdk) => {
         if (status.targetDevice !== "cuda" && !status.cpuReady) return c.json({ ok: false, error: "CPU 运行环境未下载。" }, 400);
         if (status.running && !status.foreign) return c.json({ ok: true, alreadyRunning: true });
         if (status.running && status.foreign) {
-          // 另一个目录的服务占着 8765，先把它停掉再起自己的。
-          await stopKokoroService(sdk, status.serviceRoot || (await kokoroRoot(sdk)));
+          // 端口上是另一份数据目录的服务。不停它，避免按别人报的目录杀进程。
+          return c.json({ ok: false, error: "8765 端口上是另一份数据目录的服务，没有动它。" }, 409);
         }
         const result = await startKokoroService(sdk);
         return c.json(result);
@@ -1383,10 +1401,13 @@ export default defineApp(async (sdk) => {
     app.post("/kokoro-stop", async (c) => {
       try {
         const status = await kokoroStatus(sdk);
-        if (!status.running) return c.json({ ok: true, stopped: [] });
-        // 服务可能在另一个目录（换过安装路径）。按它自己报的目录停，不误伤别的。
-        const target = status.serviceRoot || (await kokoroRoot(sdk));
-        const result = await stopKokoroService(sdk, target);
+        const root = await kokoroRoot(sdk);
+        if (!root) return c.json({ ok: true, stopped: [] });
+        // 只停当前保存的数据目录。端口上若是另一份，留着不动。
+        const result = await stopKokoroService(sdk, root);
+        if (status.foreign) {
+          return c.json({ ok: false, stopped: result.stopped, error: "8765 端口上是另一份数据目录的服务，没有动它。" }, 409);
+        }
         return c.json(result);
       } catch (error) {
         await logRouteError(sdk, "kokoro stop failed", error);

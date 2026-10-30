@@ -1,3 +1,4 @@
+import hmac
 import io
 import json
 import os
@@ -56,7 +57,19 @@ def build_pipeline():
 PIPELINE = build_pipeline()
 
 
+def token_ok(header_value):
+    """启动时由助手放进环境变量。没带对令牌就不能关服务，也不能合成。"""
+    expected = os.environ.get("KOKORO_TOKEN") or ""
+    got = header_value or ""
+    if not expected or not got:
+        return False
+    return hmac.compare_digest(expected, got)
+
+
 class Handler(BaseHTTPRequestHandler):
+    def authorized(self):
+        return token_ok(self.headers.get("X-Kokoro-Token"))
+
     def do_GET(self):
         if self.path.split("?", 1)[0] != "/health":
             self.send_error(404)
@@ -71,7 +84,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = self.path.split("?", 1)[0]
         if path == "/shutdown":
-            # 自己退出：助手先请服务退，退不动再按 pid 文件杀进程树。
+            if not self.authorized():
+                self.send_error(401, "unauthorized")
+                return
+            # 自己退出：助手先请服务退，退不动再按核对过的 pid 杀进程树。
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", "2")
@@ -81,6 +97,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path != "/v1/audio/speech":
             self.send_error(404)
+            return
+        if not self.authorized():
+            self.send_error(401, "unauthorized")
             return
         length = int(self.headers.get("Content-Length", "0"))
         if length <= 0 or length > 200_000:
