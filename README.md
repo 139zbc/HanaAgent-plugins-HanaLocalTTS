@@ -29,9 +29,23 @@
 
 完整计划见 [PLAN.md](PLAN.md)。
 
+## 代码结构
+
+`index.js` 只做入口：启动流程、注册路由和朗读工具。具体逻辑在 `lib/` 里：
+
+- `lib/errors.js`：错误文案与日志格式化（最底层，不引别人）
+- `lib/powershell.js`：所有 PowerShell 调用（SAPI 合成、语音列表、宿主偏好、播放）
+- `lib/kokoro.js`：本地模型管理（数据目录、状态、安装、服务启停、守护进程、清理）
+- `lib/speech.js`：语音合成与播放（分段、写 wav、适配器注册）
+- `lib/speech-client.js`：宿主语音任务链路（发起合成、等任务、按需拉服务）
+- `lib/routes.js`：面板和设置页的全部 HTTP 接口
+
+依赖单向：routes → speech-client/speech → kokoro/powershell → errors。改动时别让下层引上层。
+`scripts/` 里有三个自查脚本：`check-imports.mjs`（导出核对）、`check-calls.mjs`（漏引检查，有误报）、`smoke.mjs`（mock 宿主跑全部路由）。
+
 改完插件后，把 `hana-local-tts` 复制到 `C:\Users\Fantasy\.hanako\apps\hana-local-tts`，再让 Hana 重新加载这个 App（`extension_manager` 的 reload，或在 App 详情里点「重新加载」）——光复制文件不够，宿主进程还拿着旧的。
 
-下一步：M20-12 已验收。M20 的评审修复都做完了。细节在 [PLAN.md](PLAN.md) 的 M20。
+下一步：拆分已完成并通过自查，等 Fantasy 在 Hana 里重载验收（试听、面板状态、模型启停），确认后 Git 存档。
 
 ## 开发约定
 
