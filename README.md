@@ -45,7 +45,7 @@
 
 改完插件后，把 `hana-local-tts` 复制到 `C:\Users\Fantasy\.hanako\apps\hana-local-tts`，再让 Hana 重新加载这个 App（`extension_manager` 的 reload，或在 App 详情里点「重新加载」）——光复制文件不够，宿主进程还拿着旧的。
 
-下一步：拆分已完成并通过自查，等 Fantasy 在 Hana 里重载验收（试听、面板状态、模型启停），确认后 Git 存档。
+下一步：拆分已验收并合入 master。仓库主分支当前结构即 lib/ 六模块结构，细节见下方「代码结构」。
 
 ## 开发约定
 
