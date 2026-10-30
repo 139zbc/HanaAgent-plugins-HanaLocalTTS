@@ -5,6 +5,7 @@ import {
   KOKORO_INSTALL_SOURCES,
   KOKORO_PIP_SOURCES,
   KOKORO_TORCH_SOURCES,
+  cancelKokoroInstall,
   checkGpuHardware,
   cleanInstallPath,
   dataDirUnder,
@@ -44,6 +45,7 @@ import {
   portablePythonState,
   pythonDownloadProgress,
   startPythonDownload,
+  cancelPythonDownload,
 } from "../kokoro-runtime.js";
 
 export const SPEECH_TEXT_MAX_BYTES = 32 * 1024; // 宿主的语音文本预算
@@ -200,6 +202,40 @@ export function registerRoutes(sdk, app) {
         return c.json({ ok: true, source: value });
       } catch (error) {
         return c.json({ error: failureText(error) }, 500);
+      }
+    });
+
+    // 中止下载：模型 / CPU 运行环境 / GPU 运行环境。
+    app.post("/kokoro-install/cancel", async (c) => {
+      let body;
+      try {
+        body = await c.req.json();
+      } catch {
+        body = null;
+      }
+      const component = body && body.component;
+      if (component !== "model" && component !== "cpu" && component !== "gpu") {
+        return c.json({ ok: false, error: "要指定取消哪一项。" }, 400);
+      }
+      const root = await kokoroRoot(sdk);
+      if (!root) return c.json({ ok: false, error: "还没选数据目录。" }, 400);
+      try {
+        const result = await cancelKokoroInstall(sdk, root, component);
+        return c.json(result);
+      } catch (error) {
+        await logRouteError(sdk, "kokoro install cancel failed", error);
+        return c.json({ ok: false, error: failureText(error, "没能取消。") }, 500);
+      }
+    });
+
+    // 中止便携版 Python 的下载。
+    app.post("/kokoro-python/cancel", async (c) => {
+      try {
+        const result = await cancelPythonDownload(sdk, sdk.dataDir);
+        return c.json({ ok: true, ...result });
+      } catch (error) {
+        await logRouteError(sdk, "kokoro python cancel failed", error);
+        return c.json({ ok: false, error: failureText(error, "没能取消。") }, 500);
       }
     });
 

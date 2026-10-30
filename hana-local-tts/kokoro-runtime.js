@@ -42,6 +42,10 @@ const PORTABLE_PYTHON_DOWNLOAD_SECONDS = 1200;
 const PORTABLE_PYTHON_STATE = "python-state.json";
 const PORTABLE_PYTHON_LOCK = "python-download.lock";
 let pythonDownloadClaimed = false;
+// 取消便携版 Python 下载用的。标志在进程内，App 重载后靠 python-state.json 的 phase 判断。
+let pythonDownloadCancelled = false;
+// 正在下载的那个子进程（curl / PowerShell / 助手），取消时直接杀它。
+let pythonDownloadChild = null;
 
 // 宿主会清空子进程的环境变量，这里按需补齐，别让子进程依赖继承来的值。
 export function childEnv(dataDir) {
@@ -381,6 +385,7 @@ export async function startPythonDownload(sdk, dataDir) {
   if (existing.ready) return { started: false, reason: "已经有了", version: existing.version };
   if (existing.downloading) return { started: true, resumed: true };
   pythonDownloadClaimed = true;
+  pythonDownloadCancelled = false;
   const tmp = path.join(dataDir, "tmp");
   await mkdir(tmp, { recursive: true });
   const archive = path.join(tmp, "python.tar.gz");
@@ -412,6 +417,7 @@ export async function startPythonDownload(sdk, dataDir) {
         "--dir", path.join(dataDir, DOWNLOADED_DIR),
         "--state-dir", dataDir,
       ]);
+      pythonDownloadChild = child;
       await writePythonState(dataDir, { phase: "downloading", pid: child.pid });
       pythonDownloadClaimed = false;
       return { started: true, via: "helper", pid: child.pid };
@@ -435,6 +441,11 @@ async function runPythonDownload(sdk, dataDir, archive) {
   const shell = await resolveCommand(sdk, ["powershell.exe", "powershell"]);
   let lastError = "";
   for (const url of PORTABLE_PYTHON_URLS) {
+    // 用户点了取消：不要再换源接着下。
+    if (pythonDownloadCancelled) {
+      await writePythonState(dataDir, { phase: "cancelled", percent: 0, pid: 0, message: "下载已取消。" });
+      return;
+    }
     await writePythonState(dataDir, { phase: "downloading", percent: 0, message: "正在下载 Python…" });
     let ok = false;
     if (curl) ok = await downloadWithCurl(sdk, dataDir, curl, url, archive);
@@ -445,6 +456,10 @@ async function runPythonDownload(sdk, dataDir, archive) {
       lastError = "压缩包校验没通过，没有解压。";
       await rm(archive, { force: true }).catch(() => {});
     }
+    if (pythonDownloadCancelled) {
+      await writePythonState(dataDir, { phase: "cancelled", percent: 0, pid: 0, message: "下载已取消。" });
+      return;
+    }
     await writePythonState(dataDir, { phase: "retrying", percent: 0, pid: 0, message: "这个源没成，换一个…" });
   }
   await writePythonState(dataDir, {
@@ -453,6 +468,54 @@ async function runPythonDownload(sdk, dataDir, archive) {
     pid: 0,
     message: lastError || "Python 没下成，两个源都不通。",
   });
+}
+
+// 杀掉一整棵进程树。taskkill /T 会连子进程一起收掉。
+export async function killProcessTree(sdk, dataDir, pid) {
+  const id = Number(pid) || 0;
+  if (id <= 0) return false;
+  const taskkill = await resolveCommand(sdk, ["taskkill.exe", "taskkill"]);
+  if (!taskkill) return false;
+  try {
+    await runCommand(taskkill, ["/PID", String(id), "/T", "/F"], dataDir, 30000);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// 中止便携版 Python 的下载。
+//
+// 两条路都要管：助手下的（helper 的 python-install）和 Node 自己拉的 curl。
+// curl 被杀后 runPythonDownload 的循环会「这个源没成，换一个…」接着下第二个源，
+// 所以还要一个进程内的取消标志。
+export async function cancelPythonDownload(sdk, dataDir) {
+  const state = await readPythonState(dataDir);
+  const phase = state && state.phase;
+  if (phase !== "downloading" && phase !== "extracting" && phase !== "retrying") {
+    return { cancelled: false, reason: "没有在下载。" };
+  }
+  pythonDownloadCancelled = true;
+  const pid = Number(state.pid) || 0;
+  let killed = false;
+  if (pid > 0) killed = await killProcessTree(sdk, dataDir, pid);
+  if (pythonDownloadChild) {
+    try { pythonDownloadChild.kill(); } catch { /* 已经退出了 */ }
+    pythonDownloadChild = null;
+    killed = true;
+  }
+  if (!killed) {
+    // 没停住就不能装作停了：把标志撤回去，让它接着下。
+    pythonDownloadCancelled = false;
+    return { cancelled: false, reason: "没能停住这个下载进程。" };
+  }
+  // 锁的持有者已经死了才清锁，不然会把还在跑的下载挡在门外。
+  if (!pid || pid === process.pid || !pidAlive(pid)) {
+    await rm(path.join(dataDir, "tmp", PORTABLE_PYTHON_LOCK), { force: true }).catch(() => {});
+  }
+  await rm(path.join(dataDir, "tmp", "python.tar.gz"), { force: true }).catch(() => {});
+  await writePythonState(dataDir, { phase: "cancelled", percent: 0, pid: 0, message: "下载已取消。" });
+  return { cancelled: true, pid };
 }
 
 // curl.exe 下载。失败返回 false，换下一个办法。
@@ -475,8 +538,12 @@ function downloadWithCurl(sdk, dataDir, curl, url, archive) {
       return;
     }
     writePythonState(dataDir, { phase: "downloading", pid: child.pid }).catch(() => {});
+    pythonDownloadChild = child;
     child.on("error", () => resolve(false));
-    child.on("exit", (code) => resolve(code === 0));
+    child.on("exit", (code) => {
+      pythonDownloadChild = null;
+      resolve(code === 0);
+    });
   });
 }
 
@@ -501,15 +568,18 @@ function downloadWithPowerShell(sdk, dataDir, shell, url, archive) {
       return;
     }
     writePythonState(dataDir, { phase: "downloading", pid: child.pid }).catch(() => {});
+    pythonDownloadChild = child;
     const timer = setTimeout(() => {
       try { child.kill(); } catch { /* 已经退出了 */ }
     }, PORTABLE_PYTHON_DOWNLOAD_SECONDS * 1000);
     child.on("error", () => {
       clearTimeout(timer);
+      pythonDownloadChild = null;
       resolve(false);
     });
     child.on("exit", (code) => {
       clearTimeout(timer);
+      pythonDownloadChild = null;
       resolve(code === 0);
     });
   });

@@ -277,6 +277,21 @@ export async function runKokoroHelper(sdk, args, options = {}) {
   return runHelper(sdk, sdk.dataDir, [...args, "--token-file", tokenFile], { ...options, source });
 }
 
+// 中止正在进行的安装。助手负责核对进程、杀进程、写状态。
+export async function cancelKokoroInstall(sdk, root, component) {
+  const result = await runKokoroHelper(
+    sdk,
+    ["install-cancel", "--root", root, "--app-dir", sdk.dataDir, "--component", component],
+    { timeoutMs: 60000 },
+  );
+  const cancelled = !!(result && result.cancelled);
+  const reason = (result && result.reason) || "";
+  await sdk.logger.info(
+    `kokoro install cancel: ${cancelled ? "cancelled" : "not running"} pid=${result && result.pid ? result.pid : "-"} reason=${reason}`,
+  );
+  return { ok: true, cancelled, reason: (result && result.reason) || "" };
+}
+
 export async function cleanupOrphanKokoro(sdk) {
   const marker = await readSessionMarker(sdk);
   if (!marker.hanaPid) return false;

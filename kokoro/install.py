@@ -557,10 +557,31 @@ def hf_cache_layout(root: Path) -> tuple[Path, Path]:
     return cache, snapshot
 
 
+def venv_usable(python: Path) -> bool:
+    """这个环境还能用吗？
+
+    下载中途被硬杀（用户在设置页点了「取消」）可能留下一个截断的 python.exe：
+    文件在，但跑不起来。只看文件在不在会把坏环境当成现成的，重试时 pip 就废了。
+    """
+    if not python.exists():
+        return False
+    try:
+        result = subprocess.run(
+            [str(python), "-c", "import sys;print(sys.version_info[0])"],
+            capture_output=True, text=True, timeout=60, **NO_WINDOW,
+        )
+    except Exception:
+        return False
+    return result.returncode == 0
+
+
 def create_venv(root: Path, base_python: str, folder: str) -> tuple[Path, Path]:
     write_state(root, "venv", "正在创建 Python 环境…", 5)
     venv_dir = root / folder
     python = venv_dir / "Scripts" / "python.exe"
+    if python.exists() and not venv_usable(python):
+        # 上次下到一半被掐了，删掉重建。
+        shutil.rmtree(venv_dir, ignore_errors=True)
     if not python.exists():
         run([base_python, "-m", "venv", str(venv_dir)])
     return venv_dir, python

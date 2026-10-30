@@ -102,7 +102,11 @@ function maskLiterals(src) {
             if (src[j] === "{") depth += 1;
             else if (src[j] === "}") { depth -= 1; if (depth === 0) break; }
           }
-          out += src.slice(i, Math.min(j + 1, n));
+          // 模板里的 ${...} 是真代码，原样留着（里面的字符串也要抹掉，不然会被当成标识符）。
+          const expr = src.slice(i, Math.min(j + 1, n));
+          out += expr
+            .replace(/"(?:\\.|[^"\\])*"/g, (x) => " ".repeat(x.length))
+            .replace(/'(?:\\.|[^'\\])*'/g, (x) => " ".repeat(x.length));
           i = j + 1;
           continue;
         }

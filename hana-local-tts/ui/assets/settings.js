@@ -21,8 +21,19 @@ probe.addEventListener("click", async () => {
 
 function setRow(id, state, text) {
   const element = document.getElementById(id);
+  // 元素不存在就别把整页搞崩：这一行刷新不了，别的行还得能用。
+  if (!element) return;
   element.dataset.state = state;
   element.textContent = text;
+}
+
+// 下载项的名字（model / cpu / gpu）和那一行的 id 不是一回事。
+// 写错了会 getElementById 到 null，然后整个状态刷新直接报「读不到状态」。
+function rowIdForComponent(component) {
+  if (component === "model") return "kokoro-model";
+  if (component === "cpu") return "kokoro-cpu";
+  if (component === "gpu") return "kokoro-gpu";
+  return "";
 }
 
 let openSelect = null;
@@ -235,6 +246,15 @@ async function pollInstall() {
     if (!response.ok || body.error) throw new Error(body.error || "读不到安装进度。");
     if (body.phase === "none") return;
     if (body.component) activeComponent = body.component;
+    if (body.phase === "cancelled") {
+      // 有人点了「取消」：进度停，控件解锁。
+      stopPolling();
+      activeDownload = "";
+      setBusy(false);
+      hideProgress();
+      if (activeComponent) setRow(rowIdForComponent(activeComponent), "loading", "已取消");
+      return;
+    }
     showProgress(activeComponent, body.percent, body.message || body.phase);
     if (body.phase === "done") {
       stopPolling();
@@ -256,15 +276,34 @@ async function pollInstall() {
 }
 
 let pathMissing = false;
+// 有下载在进行（不只是这一个按钮的事）。
+let busyDownload = false;
+// 正在下载的那一项（模型 / CPU / GPU）。下载中时它那个按钮变成「取消」。
+let activeDownload = "";
+// 便携版 Python 是不是正在下载。
+let pythonBusy = false;
+
+// 下载中的那个按钮变成「取消」，其余照旧禁用。
+function applyDownloadButtons() {
+  const locked = busyDownload || pathMissing;
+  for (const [name, button] of Object.entries(downloadButtons)) {
+    const cancelling = name === activeDownload;
+    button.textContent = cancelling ? "取消" : "下载";
+    button.disabled = locked && !cancelling;
+  }
+  downloadPython.textContent = pythonBusy ? "取消" : "下载";
+  downloadPython.disabled = pythonBusy ? false : busyDownload;
+}
 
 function setBusy(busy) {
+  busyDownload = busy;
   const lockDownloads = busy || pathMissing;
-  for (const button of Object.values(downloadButtons)) button.disabled = lockDownloads;
   installSource.disabled = lockDownloads;
   pipSource.disabled = lockDownloads;
   torchSource.disabled = lockDownloads;
   deviceSelect.disabled = busy;
   pythonSource.disabled = busy;
+  applyDownloadButtons();
   sourceDress.sync();
   pipDress.sync();
   torchDress.sync();
@@ -304,6 +343,7 @@ async function refreshPython() {
     pythonSource.value = body.source || "auto";
     const phase = body.phase || "none";
     const busy = phase === "downloading" || phase === "extracting" || phase === "retrying";
+    pythonBusy = busy;
     if (busy) {
       setRow("kokoro-python", "loading", body.message || "正在下载…");
       showPythonProgress(body.percent || 0, body.message || "");
@@ -326,7 +366,8 @@ async function refreshPython() {
       stopPythonPolling();
       if (phase === "done") showError("", "python");
     }
-    downloadPython.hidden = body.ready === true || busy;
+    downloadPython.hidden = body.ready === true;
+    applyDownloadButtons();
     return body;
   } catch (error) {
     setRow("kokoro-python", "bad", "读不到状态");
@@ -335,12 +376,18 @@ async function refreshPython() {
 }
 
 downloadPython.addEventListener("click", async () => {
+  if (pythonBusy) {
+    await cancelPythonDownload();
+    return;
+  }
   downloadPython.disabled = true;
   setRow("kokoro-python", "loading", "正在下载…");
   try {
     const response = await hana.api.fetch("kokoro-python", { method: "POST" });
     const body = await response.json().catch(() => ({}));
     if (!response.ok || !body.ok) throw new Error(body.error || "下载没启动。");
+    pythonBusy = true;
+    applyDownloadButtons();
     showPythonProgress(0, "下载已启动…");
     ensurePythonPolling();
   } catch (error) {
@@ -350,6 +397,24 @@ downloadPython.addEventListener("click", async () => {
     downloadPython.disabled = false;
   }
 });
+
+// 中止便携版 Python 的下载。
+async function cancelPythonDownload() {
+  downloadPython.disabled = true;
+  try {
+    const response = await hana.api.fetch("kokoro-python/cancel", { method: "POST" });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok || !body.ok) throw new Error(body.error || "没能取消。");
+    pythonBusy = false;
+    stopPythonPolling();
+    hidePythonProgress();
+    showError("", "python");
+    await refreshPython();
+  } catch (error) {
+    showError(error instanceof Error ? error.message : "没能取消。", "python");
+    await refreshPython();
+  }
+}
 
 pythonSource.addEventListener("change", async () => {
   try {
@@ -384,19 +449,51 @@ async function startInstall(component) {
     const body = await response.json().catch(() => ({}));
     if (!response.ok || !body.ok) throw new Error(body.error || "下载没有启动。");
     activeComponent = component;
+    activeDownload = component;
+    applyDownloadButtons();
     showProgress(component, 0, "下载已启动…");
     ensurePolling();
   } catch (error) {
     stopPolling();
     hideProgress();
+    activeDownload = "";
     setBusy(false);
     showError(error instanceof Error ? error.message : "下载没有启动。", component);
   }
 }
 
-downloadModel.addEventListener("click", () => startInstall("model"));
-downloadCpu.addEventListener("click", () => startInstall("cpu"));
-downloadGpu.addEventListener("click", () => startInstall("gpu"));
+// 中止正在进行的下载。
+async function cancelInstall(component) {
+  const button = downloadButtons[component];
+  if (button) button.disabled = true;
+  try {
+    const response = await hana.api.fetch("kokoro-install/cancel", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ component }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok || !body.ok) throw new Error(body.error || "没能取消。");
+    stopPolling();
+    activeDownload = "";
+    setBusy(false);
+    hideProgress();
+    showError("", component);
+    // 重新探一次真实状态：可能刚好在下完，不能谎报「已取消」。
+    const status = await loadKokoroStatus();
+    const ready = status && (component === "model"
+      ? status.modelReady
+      : component === "cpu" ? status.cpuReady : status.gpuReady);
+    if (!ready) setRow(rowIdForComponent(component), "loading", "已取消");
+  } catch (error) {
+    showError(error instanceof Error ? error.message : "没能取消。", component);
+    applyDownloadButtons();
+  }
+}
+
+downloadModel.addEventListener("click", () => (activeDownload === "model" ? cancelInstall("model") : startInstall("model")));
+downloadCpu.addEventListener("click", () => (activeDownload === "cpu" ? cancelInstall("cpu") : startInstall("cpu")));
+downloadGpu.addEventListener("click", () => (activeDownload === "gpu" ? cancelInstall("gpu") : startInstall("gpu")));
 
 async function callService(path) {
   const response = await hana.api.fetch(path, { method: "POST" });
@@ -570,7 +667,8 @@ function applyNeedPath(needPath) {
   pathMissing = needPath === true;
   setupGuide.hidden = !pathMissing;
   for (const select of [installSource, pipSource, torchSource]) select.disabled = pathMissing;
-  for (const button of [downloadModel, downloadCpu, downloadGpu, startBtn, stopBtn]) button.disabled = pathMissing;
+  for (const button of [startBtn, stopBtn]) button.disabled = pathMissing;
+  applyDownloadButtons();
 }
 
 function showHint(text) {
@@ -669,6 +767,12 @@ async function loadKokoroStatus() {
       if (state.component) activeComponent = state.component;
       showProgress(activeComponent, state.percent, state.message || "下载失败。");
       showError("");
+    } else if (state && state.phase === "cancelled") {
+      // 上次是被取消的：控件解锁，那一行说清楚。
+      activeDownload = "";
+      setBusy(false);
+      hideProgress();
+      if (state.component) setRow(rowIdForComponent(state.component), "loading", "已取消");
     } else {
       hideProgress();
     }
@@ -678,12 +782,14 @@ async function loadKokoroStatus() {
     deviceDress.sync();
     pythonDress.sync();
     await refreshPython();
+    return body;
   } catch (error) {
     setRow("kokoro-model", "bad", "读不到状态");
     setRow("kokoro-cpu", "bad", "读不到状态");
     setRow("kokoro-gpu", "bad", "读不到状态");
     setRow("kokoro-running", "bad", "读不到状态");
     setRow("kokoro-device", "loading", error instanceof Error ? error.message : "读不到状态。");
+    return null;
   }
 }
 

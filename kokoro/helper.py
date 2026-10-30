@@ -786,6 +786,59 @@ def cmd_install(argv):
     emit({"started": True, "pid": process.pid, "python": sys.executable})
 
 
+def write_install_state(state_dir: str, root: str, payload: dict) -> None:
+    """把安装状态写下来。App 读的是 App 数据目录那份，安装目录那份留个底。"""
+    text = json.dumps(payload, ensure_ascii=False)
+    for folder in (state_dir, root):
+        if not folder:
+            continue
+        try:
+            os.makedirs(folder, exist_ok=True)
+            with open(os.path.join(folder, "install-state.json"), "w", encoding="utf-8") as handle:
+                handle.write(text)
+        except OSError:
+            pass
+
+
+def cmd_install_cancel(argv):
+    """中止正在进行的安装。
+
+    只杀锁里记着的那个 pid，而且要先核对它的命令行确实是这个数据目录下的
+    install.py——pid 会被复用，对不上就不动它。
+    """
+    args, rest = parse_args(argv)
+    root = os.path.abspath(args.get("root") or ".")
+    state_dir = os.path.abspath(args.get("app-dir") or args.get("state-dir") or root)
+    component = args.get("component") or ""
+    pid = read_lock_pid(install_lock_path(root))
+    if not pid or not pid_alive(pid):
+        # 锁里的进程已经没了（上次异常退出）：把锁清掉，让下一次能重来。
+        try:
+            os.remove(install_lock_path(root))
+        except OSError:
+            pass
+        emit({"cancelled": False, "reason": "没有在下载。"})
+        return
+    matched = False
+    for row in python_process_rows():
+        if row["pid"] == pid and command_line_is_script(row["command"], root, "install.py"):
+            matched = True
+            break
+    if not matched:
+        emit({"cancelled": False, "reason": "那个进程不是这次的下载，没有动它。", "pid": pid})
+        return
+    killed = _taskkill(pid) or _stop_process(pid)
+    try:
+        os.remove(install_lock_path(root))
+    except OSError:
+        pass
+    payload = {"phase": "cancelled", "message": "下载已取消。", "percent": 0}
+    if component:
+        payload["component"] = component
+    write_install_state(state_dir, root, payload)
+    emit({"cancelled": bool(killed), "pid": pid, "component": component})
+
+
 def cmd_gpu(argv):
     """查这台电脑有没有 NVIDIA 显卡。用 nvidia-smi，不行再问系统。"""
     system_root = os.environ.get("SystemRoot") or r"C:\Windows"
@@ -941,23 +994,28 @@ def load_token(path: str) -> str:
     return token
 
 
-def command_line_is_server(command_line: str, root: str) -> bool:
-    """命令行里是不是这个数据目录下的 server.py。必须整段路径对上，不用模糊匹配。"""
-    if not command_line or not root:
+def command_line_is_script(command_line: str, root: str, script_name: str) -> bool:
+    """命令行里是不是这个数据目录下的某个脚本。必须整段路径对上，不用模糊匹配。"""
+    if not command_line or not root or not script_name:
         return False
-    server = os.path.normcase(os.path.abspath(os.path.join(root, "server.py")))
+    script = os.path.normcase(os.path.abspath(os.path.join(root, script_name)))
     text = os.path.normcase(command_line)
     start = 0
     while True:
-        index = text.find(server, start)
+        index = text.find(script, start)
         if index < 0:
             return False
         before = text[index - 1] if index else ""
-        end = index + len(server)
+        end = index + len(script)
         after = text[end] if end < len(text) else ""
         if before in ("", " ", "\t", '"', "'") and after in ("", " ", "\t", '"', "'"):
             return True
         start = index + 1
+
+
+def command_line_is_server(command_line: str, root: str) -> bool:
+    """命令行里是不是这个数据目录下的 server.py。"""
+    return command_line_is_script(command_line, root, "server.py")
 
 
 def capture_text(args, timeout: int) -> str:
@@ -1511,6 +1569,7 @@ COMMANDS = {
     "check-dir": cmd_check_dir,
     "cleanup": cmd_cleanup,
     "install": cmd_install,
+    "install-cancel": cmd_install_cancel,
     "sync": cmd_sync,
     "python-install": cmd_python_install,
     "gpu": cmd_gpu,

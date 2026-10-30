@@ -6,7 +6,7 @@
 | --- | --- |
 | 插件名称 | 本地语音朗读 |
 | 插件 ID | `hana-local-tts` |
-| 当前版本 | 0.9.14 |
+| 当前版本 | 0.9.16 |
 | 宿主要求 | Hana Agent ≥ `1.2.1-beta`（manifest `minAppVersion`） |
 | 支持平台 | Windows 10 / 11（x64）。依赖 PowerShell、Windows SAPI 和系统播放器，macOS / Linux 暂不支持 |
 | 运行时依赖 | Node 由宿主提供；Python 3.12（插件可自动下载便携版，也可选用系统里已有的）；PyTorch `2.14.1`（CPU）或 `2.14.1+cu130`（GPU）；模型 `hexgrad/Kokoro-82M-v1.1-zh` |
@@ -111,7 +111,7 @@ Kokoro 中文女声（`zf_094`）合成，24 kHz 单声道 WAV，约 10 秒：
 
 ### 4.1 用安装包安装（普通用户）
 
-1. 打开 Releases 页：`https://github.com/OWNER/REPO/releases/latest`，下载安装包 `app-hana-local-tts-<版本号>.zip`（比如 `app-hana-local-tts-0.9.14.zip`）。
+1. 打开 Releases 页：`https://github.com/OWNER/REPO/releases/latest`，下载安装包 `app-hana-local-tts-<版本号>.zip`（比如 `app-hana-local-tts-0.9.16.zip`）。
 2. 在 Hana Agent 里打开**扩展 / App 管理**，选择「从本地安装包导入」，选中刚才的 zip。
 3. 阅读并授权四项权限（见上一节），安装完成后在 App 列表里能看到「本地语音朗读」，状态为已加载。
 4. 点开 App 的设置页，按 4.3 走一遍首次配置。
@@ -133,7 +133,7 @@ Copy-Item -Recurse -Force .\hana-local-tts "$env:USERPROFILE\.hanako\apps\hana-l
 仓库根目录的 `index.v2.json` 是扩展市场索引（Hana `MarketIndexV2` schema），里面指向 Release 上的安装包。发布步骤：
 
 ```bash
-node scripts/package-release.mjs --base-url https://github.com/OWNER/REPO/releases/download/v0.9.14 --publisher "你的名字"
+node scripts/package-release.mjs --base-url https://github.com/OWNER/REPO/releases/download/v0.9.16 --publisher "你的名字"
 ```
 
 产物在 `dist/`（不进 Git）：
@@ -276,7 +276,8 @@ flowchart LR
 
 ```bash
 node hana-local-tts/scripts/check-imports.mjs   # 导出核对
-node hana-local-tts/scripts/check-calls.mjs      # 漏引检查（有误报）
+node hana-local-tts/scripts/check-calls.mjs      # 漏引检查（成员访问也算）
+node hana-local-tts/scripts/check-ui-ids.mjs     # 设置页 JS 里的元素 id 核对
 node hana-local-tts/scripts/smoke.mjs            # mock 宿主跑全部路由
 ```
 
