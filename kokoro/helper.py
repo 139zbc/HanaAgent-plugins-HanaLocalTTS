@@ -346,6 +346,70 @@ def cmd_check_dir(argv):
     })
 
 
+def dir_size(path):
+    """目录里所有文件的字节数。"""
+    total = 0
+    for base, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(base, name))
+            except OSError:
+                pass
+    return total
+
+
+def cleanup_temp(temp_dir: str, max_age_minutes: int = 60) -> dict:
+    """清掉临时目录里过期的 tmp* 子目录。
+
+    服务每跑一次，phonemizer 会把 espeak-ng.dll 拷一份到 TEMP 里（Windows 上
+    它的 atexit 清理不生效，跑一次攒一个 419KB 的目录）。跑得多了就是几十 MB
+    的垃圾。
+
+    只删两样都满足的：名字以 tmp 开头、且最后修改时间超过 max_age_minutes。
+    正在跑的那个服务刚建目录，删不到；偶尔删不掉（文件正被占用）就跳过。
+    jieba.cache、torch 缓存、server.log 这些不在 tmp* 里，不动。
+    """
+    result = {"tempDir": temp_dir, "removed": 0, "freedBytes": 0}
+    if not temp_dir or not os.path.isdir(temp_dir):
+        return result
+    cutoff = time.time() - max_age_minutes * 60
+    try:
+        names = os.listdir(temp_dir)
+    except OSError:
+        return result
+    for name in names:
+        if not name.startswith("tmp"):
+            continue
+        full = os.path.join(temp_dir, name)
+        if not os.path.isdir(full):
+            continue
+        try:
+            if os.path.getmtime(full) > cutoff:
+                continue
+            size = dir_size(full)
+            shutil.rmtree(full, ignore_errors=True)
+            if os.path.isdir(full):
+                continue
+            result["removed"] += 1
+            result["freedBytes"] += size
+        except OSError:
+            continue
+    return result
+
+
+def cmd_cleanup(argv):
+    """清临时目录。"""
+    args, rest = parse_args(argv)
+    temp_dir = args.get("temp-dir") or ""
+    try:
+        max_age = int(args.get("max-age-minutes") or 60)
+    except (TypeError, ValueError):
+        max_age = 60
+    result = cleanup_temp(temp_dir, max_age)
+    result["ok"] = True
+    emit(result)
+
+
 def cmd_probe(argv):
     args, rest = parse_args(argv)
     root = os.path.abspath(args.get("root") or (rest[0] if rest else "."))
@@ -639,6 +703,8 @@ def start_service(root: str, device: str, wait: bool = True, temp_dir: str = "")
         fail("安装目录里没有 server.py，请重新安装。")
     tmp = os.path.join(root, "tmp")
     os.makedirs(tmp, exist_ok=True)
+    # 服务每跑一次会在 TEMP 里攒一份 espeak-ng.dll 的副本。起服务前先把旧的清掉。
+    cleanup_temp(tmp, 60)
     env = os.environ.copy()
     env["KOKORO_DEVICE"] = device
     env["HF_HUB_CACHE"] = os.path.join(root, "hf-cache")
@@ -977,6 +1043,7 @@ def cmd_hana_pid(argv):
 COMMANDS = {
     "probe": cmd_probe,
     "check-dir": cmd_check_dir,
+    "cleanup": cmd_cleanup,
     "install": cmd_install,
     "sync": cmd_sync,
     "python-install": cmd_python_install,

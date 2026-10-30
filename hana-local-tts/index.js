@@ -367,6 +367,22 @@ async function kokoroRoot(sdk) {
   }
 }
 
+// App 刚起来的时候，宿主还没把这个 App 的设置贡献挂上去，这时候读配置是空的
+// （挂上去之前 getAll() 拿不到 kokoroRoot）。等它挂好再读。
+//
+// 不等会出事：以前 kokoroRoot() 有个写死的默认路径兜底，读不到配置也不影响；
+// 去掉那个兜底之后，依赖配置的动作就会在每次重载后悄悄失效——“Hana 退出时
+// 自动停服务”的守护进程起不来（实测：重载后 watcher 一直没起来，pid 文件里
+// 的进程早没了，服务会在 Hana 退出后留在后台）。
+async function kokoroRootReady(sdk) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const root = await kokoroRoot(sdk);
+    if (root) return root;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  return "";
+}
+
 function kokoroVoiceId(value) {
   return typeof value === "string" && KOKORO_VOICE_IDS.has(value) ? value : KOKORO_DEFAULT_VOICE;
 }
@@ -996,13 +1012,59 @@ async function stopWatcher(sdk) {
   return 1;
 }
 
+// 定期清理临时目录。
+//
+// 服务每跑一次，phonemizer 会把 espeak-ng.dll 拷一份到 TEMP 里（Windows 上它的
+// atexit 清理不生效），一次 419KB。起服务时会清上一轮的，但服务不重启就一直攒着，
+// 所以这里再补一个定时清理。
+const CLEANUP_INTERVAL_MS = 30 * 60 * 1000;
+const CLEANUP_MAX_AGE_MINUTES = 60;
+let cleanupTimer = null;
+
+async function cleanupTempDirs(sdk, waitForConfig = false) {
+  const root = waitForConfig ? await kokoroRootReady(sdk) : await kokoroRoot(sdk);
+  const dirs = [];
+  if (root) dirs.push(path.join(root, "tmp"));
+  dirs.push(path.join(sdk.dataDir, "tmp"));
+  for (const dir of dirs) {
+    try {
+      const result = await runKokoroHelper(sdk, ["cleanup", "--temp-dir", dir, "--max-age-minutes", String(CLEANUP_MAX_AGE_MINUTES)], { timeoutMs: 60000 });
+      if (result && result.removed > 0) {
+        await sdk.logger.info(`cleaned ${result.removed} temp dirs (${result.freedBytes} bytes) in ${dir}`);
+      }
+    } catch (error) {
+      await sdk.logger.warn(`temp cleanup failed for ${dir}: ${errorDetail(error)}`);
+    }
+  }
+}
+
+function startCleanupLoop(sdk) {
+  if (cleanupTimer) return;
+  cleanupTimer = setInterval(() => {
+    cleanupTempDirs(sdk).catch((error) => {
+      sdk.logger.warn(`temp cleanup failed: ${errorDetail(error)}`);
+    });
+  }, CLEANUP_INTERVAL_MS);
+  // 定时器不拖住进程：App 进程本来就由宿主管。
+  if (typeof cleanupTimer.unref === "function") cleanupTimer.unref();
+}
+
+// 等配置挂上来再拉守护进程。不阻塞 App 启动。
+async function ensureWatcherWhenReady(sdk) {
+  await kokoroRootReady(sdk);
+  try {
+    await ensureWatcher(sdk);
+  } catch (error) {
+    await sdk.logger.error(`kokoro watcher failed to start: ${failureText(error)}`);
+  }
+}
+
 async function ensureWatcher(sdk) {
   if (watcherRunning) return;
   if (!(await autoStopEnabled(sdk))) return;
   const root = await kokoroRoot(sdk);
   // 还没选数据目录：没服务要守。
-  if (!root) return;
-  const hanaPid = await findHanaPid(sdk);
+  if (!root) return;  const hanaPid = await findHanaPid(sdk);
   if (!hanaPid) return;
   // 开关文件：用户关掉「自动停止」时删掉它，守护进程就不再停服务。
   const flag = autoStopFlagPath(sdk);
@@ -1035,7 +1097,14 @@ export default defineApp(async (sdk) => {
   await registerSpeechProvider(sdk);
   // 方案 A：先清理上次遗留的服务，再拉守护进程（方案 B）
   await cleanupOrphanKokoro(sdk);
-  await ensureWatcher(sdk);
+  // 守护进程和清理都要读配置，而配置要等宿主把设置贡献挂上来才读得到。
+  // 这两件事不挡着路由注册，挂在后台等就行。
+  ensureWatcherWhenReady(sdk);
+  // 定时清理临时目录：服务跑一次会攒一份 espeak-ng.dll 的副本。
+  startCleanupLoop(sdk);
+  cleanupTempDirs(sdk, true).catch((error) => {
+    sdk.logger.warn(`temp cleanup start failed: ${errorDetail(error)}`);
+  });
 
   await sdk.routes.register((app) => {
     app.get("/probe", (c) => c.json({ ready: !speechProviderError, error: speechProviderError }));
