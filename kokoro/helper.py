@@ -22,7 +22,9 @@ MODEL_DIR = "models--hexgrad--Kokoro-82M-v1.1-zh"
 MODEL_FILE = "kokoro-v1_1-zh.pth"
 ACTIVE_PHASES = ("venv", "deps", "torch", "model", "verify")
 # 声音文件按需补下：换声音时只下这一个，放回 HF 缓存布局的 installed 快照里。
-VOICE_RE = re.compile(r"^[a-z]{2}_\d{3}$")
+# 和 kokoro-voices.js 里的 id 用同一条规则：两位字母，加下划线，再加数字或英文名。
+# 例如 zf_094、af_maple。对不上就报错，不许改成别的声音。
+VOICE_RE = re.compile(r"^[a-z]{2}_[a-z0-9]{2,16}$")
 VOICE_SOURCES = (
     ("modelscope", "https://modelscope.cn/models/AI-ModelScope/Kokoro-82M-v1.1-zh/resolve/master/voices/%s.pt"),
     ("hf-mirror", "https://hf-mirror.com/hexgrad/Kokoro-82M-v1.1-zh/resolve/main/voices/%s.pt"),
@@ -513,7 +515,7 @@ def cmd_install(argv):
     torch_source = args.get("torch-source") or "nju"
     voice = args.get("voice") or "zf_094"
     if not VOICE_RE.match(voice):
-        voice = "zf_094"
+        fail("声音名不对：%s" % voice)
     if component not in ("model", "cpu", "gpu"):
         fail("要指定下载模型、CPU 运行环境或 GPU 运行环境。")
 

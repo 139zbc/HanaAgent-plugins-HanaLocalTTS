@@ -27,7 +27,8 @@ REPO_ID_MS = "AI-ModelScope/Kokoro-82M-v1.1-zh"
 CONFIG_FILE = "config.json"
 MODEL_FILE = "kokoro-v1_1-zh.pth"
 DEFAULT_VOICE = "zf_094"
-VOICE_RE = re.compile(r"^[a-z]{2}_\d{3}$")
+# 和 kokoro-voices.js、helper.py 用同一条规则。对不上就失败，不许改成 zf_094。
+VOICE_RE = re.compile(r"^[a-z]{2}_[a-z0-9]{2,16}$")
 DEPENDENCIES = [
     "kokoro==0.9.4",
     "soundfile",
@@ -803,7 +804,9 @@ def main() -> None:
                 raise RuntimeError("不认识的模型下载源")
             if pip_source not in PIP_INDEXES:
                 pip_source = "tuna"
-            voice = args.voice if VOICE_RE.match(args.voice or "") else DEFAULT_VOICE
+            voice = args.voice or DEFAULT_VOICE
+            if not VOICE_RE.match(voice):
+                raise RuntimeError(f"声音名不对：{voice}")
             install_model(root, sys.executable, args.source, pip_source, voice)
         elif args.component == "cpu":
             if args.source in PIP_INDEXES:

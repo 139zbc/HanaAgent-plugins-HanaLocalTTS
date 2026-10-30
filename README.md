@@ -31,7 +31,7 @@
 
 改完插件后，把 `hana-local-tts` 复制到 `C:\Users\Fantasy\.hanako\apps\hana-local-tts`，再让 Hana 重新加载这个 App（`extension_manager` 的 reload，或在 App 详情里点「重新加载」）——光复制文件不够，宿主进程还拿着旧的。
 
-下一步：M20-3 已验收。接下来是 M20-4：英文声音名单和下载规则用同一份，选 Maple 时不再悄悄改成别的声音。细节在 [PLAN.md](PLAN.md) 的 M20。
+下一步：M20-4 已验收。接下来是 M20-5：分段播放失败时删掉还没播的音频，失败原因显示在面板上。细节在 [PLAN.md](PLAN.md) 的 M20。
 
 ## 开发约定
 
