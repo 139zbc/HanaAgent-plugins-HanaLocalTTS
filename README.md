@@ -31,7 +31,7 @@
 
 改完插件后，把 `hana-local-tts` 复制到 `C:\Users\Fantasy\.hanako\apps\hana-local-tts`，再让 Hana 重新加载这个 App（`extension_manager` 的 reload，或在 App 详情里点「重新加载」）——光复制文件不够，宿主进程还拿着旧的。
 
-下一步：M20-5 已验收。接下来是 M20-6：目录大小记在文件里，打开面板时不再扫整个数据目录。细节在 [PLAN.md](PLAN.md) 的 M20。
+下一步：M20-6 已验收。接下来一轮是 M20-7 到 M20-9：朗读前核对端口上的目录、便携版 Python 下载更稳、守护进程退出后能再拉。细节在 [PLAN.md](PLAN.md) 的 M20。
 
 ## 开发约定
 

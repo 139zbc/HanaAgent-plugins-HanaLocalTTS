@@ -108,6 +108,58 @@ def model_ready(root):
     return False
 
 
+SIZE_CACHE_NAME = "size-cache.json"
+
+
+def read_size_cache(root):
+    try:
+        with open(os.path.join(root, SIZE_CACHE_NAME), "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
+def remember_sizes(root):
+    """服务刚起来时重算一次大小。失败不影响启动。"""
+    cpu_venv = os.path.join(root, ".venv-cpu")
+    gpu_venv = os.path.join(root, ".venv-cuda")
+    legacy_venv = os.path.join(root, ".venv")
+    legacy = legacy_device(legacy_venv)
+    if marked_device(cpu_venv) != "cpu" and legacy == "cpu":
+        cpu_venv = legacy_venv
+    if marked_device(gpu_venv) != "cuda" and legacy == "cuda":
+        gpu_venv = legacy_venv
+    try:
+        write_size_cache(root, cpu_venv, gpu_venv)
+    except OSError:
+        pass
+
+
+def write_size_cache(root, cpu_venv, gpu_venv):
+    """把目录大小记到文件里。只有安装完成或服务刚起来时才走这里。"""
+    model_dir = os.path.join(root, "hf-cache", MODEL_DIR)
+    total, sizes = measure_dirs(root, [
+        ("model", model_dir),
+        ("cpu", cpu_venv),
+        ("gpu", gpu_venv),
+    ])
+    payload = {
+        "modelBytes": sizes["model"],
+        "cpuBytes": sizes["cpu"],
+        "gpuBytes": sizes["gpu"],
+        "dirGB": round(total / (1024 ** 3), 1),
+    }
+    target = os.path.join(root, SIZE_CACHE_NAME)
+    temp = target + ".part"
+    with open(temp, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle)
+    os.replace(temp, target)
+    return payload
+
+
 def measure_dirs(root, components):
     """一次遍历算出根目录的总大小和各子目录的大小。
 
@@ -450,18 +502,37 @@ def cmd_probe(argv):
                 gpu = False
     service = service_state()
     foreign = service["running"] and service["root"] and not same_path(service["root"], root)
-    # 三份各自的名字和大小，页面显示「已下载（名字 大小）」。
-    model_dir = os.path.join(root, "hf-cache", MODEL_DIR)
+    # 大小用记下来的文件。打开面板不再把整个数据目录走一遍。
+    # 没有记录，或安装刚结束（install-state.json 比记录新，而且已经 done/failed），才重算一次。
+    sizes = {"model": 0, "cpu": 0, "gpu": 0}
+    dir_gb = None
     if os.path.isdir(root):
-        total, sizes = measure_dirs(root, [
-            ("model", model_dir),
-            ("cpu", cpu_venv),
-            ("gpu", gpu_venv),
-        ])
-        dir_gb = round(total / (1024 ** 3), 1)
-    else:
-        sizes = {"model": 0, "cpu": 0, "gpu": 0}
-        dir_gb = None
+        cached = read_size_cache(root)
+        phase = str(state.get("phase") or "") if isinstance(state, dict) else ""
+        in_progress = phase not in ("", "done", "failed", "none")
+        state_newer = False
+        try:
+            state_path = os.path.join(root, "install-state.json")
+            cache_path = os.path.join(root, SIZE_CACHE_NAME)
+            if os.path.isfile(state_path) and os.path.isfile(cache_path):
+                state_newer = os.path.getmtime(state_path) > os.path.getmtime(cache_path)
+        except OSError:
+            state_newer = False
+        should_measure = (cached is None and not in_progress) or (phase in ("done", "failed") and state_newer)
+        if should_measure:
+            try:
+                cached = write_size_cache(root, cpu_venv, gpu_venv)
+            except OSError:
+                pass
+        if cached:
+            sizes = {
+                "model": int(cached.get("modelBytes") or 0),
+                "cpu": int(cached.get("cpuBytes") or 0),
+                "gpu": int(cached.get("gpuBytes") or 0),
+            }
+            dir_value = cached.get("dirGB")
+            if isinstance(dir_value, (int, float)):
+                dir_gb = dir_value
     emit({
         "model": model,
         "cpu": cpu,
@@ -916,6 +987,7 @@ def start_service(root: str, device: str, wait: bool = True, temp_dir: str = "",
             health = service_state()
             decision, listener = start_choice(root, existing, health["running"])
             if decision == "reuse":
+                remember_sizes(root)
                 return {"started": False, "running": True, "device": health["device"], "pid": listener}
             if decision == "foreign":
                 for pid in list(existing):
@@ -987,6 +1059,7 @@ def start_service(root: str, device: str, wait: bool = True, temp_dir: str = "",
             decision, _listener = start_choice(root, set(pids_for_server(root)) | {process.pid}, health["running"])
             if decision == "reuse":
                 keep = True
+                remember_sizes(root)
                 return {"started": True, "running": True, "device": health["device"], "pid": process.pid}
             if decision == "foreign":
                 fail("8765 端口上是另一份服务，没有启动新的。")
