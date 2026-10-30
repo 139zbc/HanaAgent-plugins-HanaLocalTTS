@@ -799,10 +799,91 @@ def request_shutdown(token: str) -> bool:
         return False
 
 
+def server_log_tail(tmp: str) -> str:
+    for name in ("server.err", "server.log"):
+        path = os.path.join(tmp, name)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                lines = [line.strip() for line in handle.read().splitlines() if line.strip()]
+        except OSError:
+            continue
+        if lines:
+            return lines[-1]
+    return ""
+
+
+def kill_verified(pid: int, root: str) -> bool:
+    """只杀命令行确认是这个目录 server.py 的进程。对不上就不动。"""
+    if not pid:
+        return False
+    for _ in range(3):
+        if not pid_alive(pid):
+            return False
+        matched = any(
+            item_pid == int(pid) and command_line_is_server(command, root)
+            for item_pid, command in python_processes()
+        )
+        if matched:
+            return _taskkill(pid) or _stop_process(pid)
+        time.sleep(0.2)
+    return False
+
+
+def start_decision(existing, listener: int, health_running: bool) -> str:
+    """启动前怎么处理已有进程。
+
+    foreign：端口上是别人的服务，不能再起一份，也不能去停它。
+    reuse：已经是我们这份，并且端口就是它在听。
+    wait：我们这份还在加载，端口还没起来，不要再起第二份。
+    spawn：没有我们的进程，可以新起。
+    """
+    ours = set(existing or [])
+    if health_running and listener and listener not in ours:
+        return "foreign"
+    if health_running and listener in ours:
+        return "reuse"
+    if ours:
+        return "wait"
+    return "spawn"
+
+
 def start_service(root: str, device: str, wait: bool = True, temp_dir: str = "", token: str = "") -> dict:
-    state = service_state()
-    if state["running"]:
-        return {"started": False, "running": True, "device": state["device"], "pid": 0}
+    existing = set(pids_for_server(root))
+    health = service_state()
+    listener = listening_pid(PORT) if health["running"] else 0
+    decision = start_decision(existing, listener, health["running"])
+    if decision == "foreign":
+        for pid in list(existing):
+            kill_verified(pid, root)
+        fail("8765 端口上是另一份服务，没有启动新的。")
+    if decision == "reuse":
+        return {"started": False, "running": True, "device": health["device"], "pid": listener}
+    if decision == "wait":
+        if not wait:
+            return {"started": True, "running": False, "device": device, "pid": min(existing)}
+        deadline = time.monotonic() + 180
+        while time.monotonic() < deadline:
+            health = service_state()
+            listener = listening_pid(PORT) if health["running"] else 0
+            decision = start_decision(existing, listener, health["running"])
+            if decision == "reuse":
+                return {"started": False, "running": True, "device": health["device"], "pid": listener}
+            if decision == "foreign":
+                for pid in list(existing):
+                    kill_verified(pid, root)
+                fail("8765 端口上是另一份服务，没有启动新的。")
+            if not any(pid_alive(pid) for pid in existing):
+                existing = set()
+                break
+            time.sleep(0.5)
+        else:
+            for pid in list(existing):
+                kill_verified(pid, root)
+            fail("本地 Kokoro 启动超时。请再点一次朗读。")
+    if not token:
+        fail("没有本地服务令牌，服务不会在没有令牌的情况下启动。")
     python = venv_python(root, device)
     if not python:
         fail("当前选择的运行环境未下载。")
@@ -813,8 +894,6 @@ def start_service(root: str, device: str, wait: bool = True, temp_dir: str = "",
     os.makedirs(tmp, exist_ok=True)
     # 服务每跑一次会在 TEMP 里攒一份 espeak-ng.dll 的副本。起服务前先把旧的清掉。
     cleanup_temp(tmp, 60)
-    if not token:
-        fail("没有本地服务令牌，服务不会在没有令牌的情况下启动。")
     env = os.environ.copy()
     env["KOKORO_TOKEN"] = token
     env["KOKORO_DEVICE"] = device
@@ -847,29 +926,29 @@ def start_service(root: str, device: str, wait: bool = True, temp_dir: str = "",
         creationflags=flags,
         close_fds=True,
     )
-    if not wait:
-        return {"started": True, "running": False, "device": device, "pid": process.pid}
-    deadline = time.monotonic() + 180
-    while time.monotonic() < deadline:
-        state = service_state()
-        if state["running"]:
-            return {"started": True, "running": True, "device": state["device"], "pid": process.pid}
-        if process.poll() is not None:
-            tail = ""
-            for name in ("server.err", "server.log"):
-                path = os.path.join(tmp, name)
-                if os.path.isfile(path):
-                    try:
-                        with open(path, "r", encoding="utf-8", errors="replace") as handle:
-                            lines = [line.strip() for line in handle.read().splitlines() if line.strip()]
-                        if lines:
-                            tail = lines[-1]
-                            break
-                    except OSError:
-                        pass
-            fail("本地 Kokoro 启动超时。" + (tail if tail else ""))
-        time.sleep(0.5)
-    fail("本地 Kokoro 启动超时。请再点一次朗读。")
+    keep = False
+    try:
+        if not wait:
+            keep = True
+            return {"started": True, "running": False, "device": device, "pid": process.pid}
+        deadline = time.monotonic() + 180
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                tail = server_log_tail(tmp)
+                fail("本地 Kokoro 没有启动起来。" + (tail if tail else ""))
+            health = service_state()
+            listener = listening_pid(PORT) if health["running"] else 0
+            decision = start_decision({process.pid}, listener, health["running"])
+            if decision == "reuse":
+                keep = True
+                return {"started": True, "running": True, "device": health["device"], "pid": process.pid}
+            if decision == "foreign":
+                fail("8765 端口上是另一份服务，没有启动新的。")
+            time.sleep(0.5)
+        fail("本地 Kokoro 启动超时。请再点一次朗读。")
+    finally:
+        if not keep and process.poll() is None:
+            kill_verified(process.pid, root)
 
 
 def stop_service(root: str, token: str = "") -> dict:

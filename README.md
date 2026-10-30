@@ -31,7 +31,7 @@
 
 改完插件后，把 `hana-local-tts` 复制到 `C:\Users\Fantasy\.hanako\apps\hana-local-tts`，再让 Hana 重新加载这个 App（`extension_manager` 的 reload，或在 App 详情里点「重新加载」）——光复制文件不够，宿主进程还拿着旧的。
 
-下一步：M20-1 已验收。接下来是 M20-2：启动失败要收掉刚拉起的进程，再次启动先找已经在跑的那份。细节在 [PLAN.md](PLAN.md) 的 M20。
+下一步：M20-2 已存档。接下来是 M20-3：合成一次只跑一路，正在朗读时再点会提示等这一段结束。细节在 [PLAN.md](PLAN.md) 的 M20。
 
 ## 开发约定
 
