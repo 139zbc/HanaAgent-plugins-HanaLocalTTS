@@ -15,7 +15,7 @@
 | 网络需求 | 只在安装期联网（下载 Python / 模型 / 依赖）。装好后朗读完全离线 |
 | 许可证 | Apache License 2.0（[官方全文](https://www.apache.org/licenses/LICENSE-2.0)） |
 
-仓库地址：`https://github.com/OWNER/REPO`（发布前把 `OWNER/REPO` 换成实际账号和仓库名）。
+仓库地址：`https://github.com/139zbc/HanaAgent-plugins-HanaLocalTTS`。
 
 ---
 
@@ -73,7 +73,7 @@
 
 Kokoro 中文女声（`zf_094`）合成，24 kHz 单声道 WAV，约 10 秒：
 
-**[▶ 点这里试听 kokoro-zh-demo.wav](https://github.com/OWNER/REPO/releases/latest/download/kokoro-zh-demo.wav)**
+**[▶ 点这里试听 kokoro-zh-demo.wav](https://github.com/139zbc/HanaAgent-plugins-HanaLocalTTS/releases/latest/download/kokoro-zh-demo.wav)**
 
 > GitHub 会过滤 README 里的 `<audio>` 标签，所以这里用链接：点开后浏览器直接播放这段 WAV。
 > 音频文件在仓库的 `docs/sample/kokoro-zh-demo.wav`，发布时把它作为 Release 附件上传（文件名保持 `kokoro-zh-demo.wav`）即可，上面的链接用 `releases/latest/download` 指向最新版本的附件，不需要改。
@@ -112,7 +112,7 @@ Kokoro 中文女声（`zf_094`）合成，24 kHz 单声道 WAV，约 10 秒：
 
 ### 4.1 用安装包安装（普通用户）
 
-1. 打开 Releases 页：`https://github.com/OWNER/REPO/releases/latest`，下载安装包 `app-hana-local-tts-<版本号>.zip`（比如 `app-hana-local-tts-0.9.16.zip`）。
+1. 打开 Releases 页：`https://github.com/139zbc/HanaAgent-plugins-HanaLocalTTS/releases/latest`，下载安装包 `app-hana-local-tts-<版本号>.zip`（比如 `app-hana-local-tts-0.9.16.zip`）。
 2. 在 Hana Agent 里打开**扩展 / App 管理**，选择「从本地安装包导入」，选中刚才的 zip。
 3. 阅读并授权四项权限（见上一节），安装完成后在 App 列表里能看到「本地语音朗读」，状态为已加载。
 4. 点开 App 的设置页，按 4.3 走一遍首次配置。
@@ -134,7 +134,7 @@ Copy-Item -Recurse -Force .\hana-local-tts "$env:USERPROFILE\.hanako\apps\hana-l
 仓库根目录的 `index.v2.json` 是扩展市场索引（Hana `MarketIndexV2` schema），里面指向 Release 上的安装包。发布步骤：
 
 ```bash
-node scripts/package-release.mjs --base-url https://github.com/OWNER/REPO/releases/download/v0.9.16 --publisher "你的名字"
+node scripts/package-release.mjs --base-url https://github.com/139zbc/HanaAgent-plugins-HanaLocalTTS/releases/download/v0.9.16 --publisher "139zbc"
 ```
 
 产物在 `dist/`（不进 Git）：
