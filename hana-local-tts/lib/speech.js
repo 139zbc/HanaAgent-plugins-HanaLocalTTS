@@ -19,6 +19,15 @@ let systemVoiceCache = [];
 // 不重复问助手；合成失败时清掉，下次重新确认，声音文件被删了也能自愈。
 const readyVoices = new Set();
 
+// 换了数据目录，之前确认过的声音文件不在新目录里，要把记录清掉。
+//
+// 为什么不直接导出 readyVoices：集合本身是模块内部状态，别的模块只该「清一下」。
+// 之前这里没导出、调用方也没 import，路由跑到这一行直接抛 ReferenceError，
+// 改数据目录整个失败（实测：新电脑装完按引导选目录，一直提示没保存）。
+export function clearReadyVoices() {
+  readyVoices.clear();
+}
+
 // 装模型时带哪个声音：宿主多媒体里选的那个，读不到就用 App 自己存的、再读不到用默认。
 export async function currentKokoroVoice(sdk) {
   const host = await readHostSpeechPrefs(sdk);

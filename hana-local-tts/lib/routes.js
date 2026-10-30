@@ -23,6 +23,7 @@ import {
   stopWatcher,
 } from "./kokoro.js";
 import {
+  clearReadyVoices,
   currentKokoroVoice,
   playbackStateSnapshot,
   readSpeechPrefs,
@@ -302,7 +303,7 @@ export function registerRoutes(sdk, app) {
         return c.json({ error: failureText(error) }, 500);
       }
       // 声音文件是按目录放的，换了目录要重新确认一遍。
-      readyVoices.clear();
+      clearReadyVoices();
       await sdk.logger.info(`kokoro root set to ${root}`);
       return c.json({ ok: true, root, picked, previous, checked: !!check, freeBytes: (check && check.freeBytes) || 0, stopped });
     });
